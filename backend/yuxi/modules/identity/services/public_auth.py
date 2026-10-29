@@ -42,10 +42,10 @@ async def resolve_public_user(*, owner: User, api_key: APIKey | None, end_user_i
             raise PublicIdentityDenied("X-End-User-Id 仅适用于 API Key")
         return owner
     if not api_key.app_id:
-        if api_key.access_level != "full":
-            raise PublicIdentityDenied("Agents Public API 需要绑定 app_id 的 API Key")
+        if api_key.access_level not in {"full", "agents"}:
+            raise PublicIdentityDenied("该 API Key 无权使用 Agents Public API")
         if end_user_id is not None:
-            raise PublicIdentityDenied("无 APP 的 full Key 不接受 X-End-User-Id")
+            raise PublicIdentityDenied("本人身份的 Key 不接受 X-End-User-Id")
         return owner
 
     identity = DEFAULT_END_USER_ID if end_user_id is None else end_user_id

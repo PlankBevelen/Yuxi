@@ -45,9 +45,9 @@ Yuxi 要求创建与提交携带幂等键，每次仅接收一个事件，图片
 
 ## 身份与作用域
 
-登录用户用 JWT 调用 Public API；CLI 或产品集成可用未绑定 APP 的 `full` Key，以密钥所属用户身份访问同一产品作用域。外部应用使用绑定 `app_id` 的 `agents` API Key。服务端从 Key 决定 APP，客户端的 `X-App-Id` 不改变作用域。绑定 APP 的 Key 可提供 `X-End-User-Id`，服务端在 Key 所属用户和 APP 内解析独立终端用户；未提供时使用该 APP 的默认终端用户。后续查询和订阅使用相同 Header。JWT 与未绑定 APP 的 `full` Key 不接受该 Header；APP 终端用户不能访问产品 Thread 或 Workspace。密钥创建与权限见 [API Key 接入](./api-key-integration.md)。
+登录用户用 JWT 调用 Public API；个人集成可用未绑定 APP 的 `agents` 或 `full` Key，以密钥所属用户身份访问同一产品作用域。外部应用使用绑定 `app_id` 的 `agents` API Key。服务端从 Key 决定 APP，客户端的 `X-App-Id` 不改变作用域。绑定 APP 的 Key 可提供 `X-End-User-Id`，服务端在 Key 所属用户和 APP 内解析独立终端用户；未提供时使用该 APP 的默认终端用户。后续查询和订阅使用相同 Header。JWT 与未绑定 APP 的 `agents` 或 `full` Key 不接受该 Header（包括本人 UID）；APP 终端用户不能访问产品 Thread 或 Workspace。密钥创建与权限见 [API Key 接入](./api-key-integration.md)。
 
-所有 APP 终端用户，包括默认终端用户，都无法发现、读取或运行私有 Agent。JWT 和未绑定 APP 的个人 `full` Key 可使用自己的私有 Agent；系统管理员治理其他人的私有定义使用产品管理接口。完整规则见[资源权限](../mechanisms/resource-permissions.md)。
+所有 APP 终端用户，包括默认终端用户，都无法发现、读取或运行私有 Agent。JWT 和未绑定 APP 的个人 `agents` 或 `full` Key 可使用自己的私有 Agent；系统管理员治理其他人的私有定义使用产品管理接口。完整规则见[资源权限](../mechanisms/resource-permissions.md)。
 
 系统的用户列表和共享候选默认只显示系统用户。管理员在用户管理中通过“用户类型”筛选显式查看 APP 终端用户或全部类型，“所属部门/实例”列显示终端用户的 `app_id`。长用户名和 ID 在列表中缩略，点击用户信息可查看完整值。
 

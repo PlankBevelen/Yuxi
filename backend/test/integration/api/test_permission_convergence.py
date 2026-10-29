@@ -127,6 +127,19 @@ async def test_private_agent_crud_isolation_governance_and_app_default(actors):
         json={"agent_id": slug},
     )
     assert run.status_code in {403, 404}, run.text
+    personal_key = await client.post(
+        "/api/user/apikey/",
+        headers=owner["headers"],
+        json={"name": "Personal private Agent", "request_id": str(uuid.uuid4()), "access_level": "agents"},
+    )
+    assert personal_key.status_code == 200, personal_key.text
+    actors["keys"].append(personal_key.json()["api_key"]["id"])
+    personal_headers = {"Authorization": f"Bearer {personal_key.json()['secret']}"}
+    personal_listing = await client.get("/api/v1/agents", headers=personal_headers)
+    assert personal_listing.status_code == 200 and slug in {item["id"] for item in personal_listing.json()["data"]}
+    personal_detail = await client.get(f"/api/v1/agents/{slug}", headers=personal_headers)
+    assert personal_detail.status_code == 200 and personal_detail.json()["id"] == slug
+
     key = await client.post(
         "/api/user/apikey/",
         headers=owner["headers"],

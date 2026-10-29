@@ -54,7 +54,9 @@
                   <span>{{ accessLevelLabel(record.access_level) }}</span>
                 </template>
                 <template v-if="column.key === 'app'">
-                  <span class="time-text">{{ record.app_id || '未设置' }}</span>
+                  <span class="time-text">{{
+                    record.app_id || (record.access_level === 'knowledge' ? '未设置' : '本人身份')
+                  }}</span>
                 </template>
                 <template v-if="column.key === 'status'">
                   <div class="status-cell">
@@ -122,9 +124,34 @@
             <a-select-option value="full">完整访问（含产品内接口）</a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="调用来源" :required="createForm.access_level === 'agents'">
-          <a-input v-model:value="createForm.app_id" :maxlength="64" placeholder="如：customer-service" />
+        <a-form-item v-if="createForm.access_level !== 'knowledge'" label="资源身份" required>
+          <a-radio-group v-model:value="createForm.identity_scope" aria-label="资源身份">
+            <a-radio value="self">本人身份</a-radio>
+            <a-radio value="app">APP 终端用户身份</a-radio>
+          </a-radio-group>
         </a-form-item>
+        <a-form-item
+          v-if="createForm.access_level === 'knowledge' || createForm.identity_scope === 'app'"
+          label="APP 标识"
+          :required="createForm.access_level !== 'knowledge'"
+        >
+          <a-input
+            v-model:value="createForm.app_id"
+            :maxlength="64"
+            placeholder="如：customer-service"
+          />
+        </a-form-item>
+        <a-alert
+          v-if="createForm.access_level === 'agents'"
+          type="info"
+          :message="
+            createForm.identity_scope === 'self'
+              ? '可访问本人已有的可见会话和工作区，并通过 Agent 使用已授权工具；不限于此 Key 新建的会话，也不是只读凭据。'
+              : '会话和工作区属于 APP 的独立终端用户；未声明终端用户时使用该 APP 的默认终端用户。'
+          "
+          show-icon
+          class="scope-notice"
+        />
         <a-alert
           v-if="createForm.access_level === 'full'"
           type="warning"
@@ -150,6 +177,18 @@
       @ok="handleEdit"
     >
       <a-form layout="vertical" :model="editForm">
+        <a-alert
+          v-if="editScopeChanged"
+          type="warning"
+          :message="
+            editAppId
+              ? `保存后切换到 APP「${editAppId}」的终端用户资源`
+              : '保存后切换到 Key 所属用户的本人资源'
+          "
+          :description="`当前身份：${editingKey.app_id ? `APP「${editingKey.app_id}」终端用户` : '本人'}。切换立即改变此 Key 可访问的会话和工作区范围，不移动历史数据。`"
+          show-icon
+          class="scope-notice"
+        />
         <a-form-item label="访问权限" required>
           <a-select v-model:value="editForm.access_level">
             <a-select-option value="agents">仅 Agents Public API</a-select-option>
@@ -157,9 +196,34 @@
             <a-select-option value="full">完整访问（含产品内接口）</a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="调用来源" :required="editForm.access_level === 'agents'">
-          <a-input v-model:value="editForm.app_id" :maxlength="64" placeholder="如：customer-service" />
+        <a-form-item v-if="editForm.access_level !== 'knowledge'" label="资源身份" required>
+          <a-radio-group v-model:value="editForm.identity_scope" aria-label="资源身份">
+            <a-radio value="self">本人身份</a-radio>
+            <a-radio value="app">APP 终端用户身份</a-radio>
+          </a-radio-group>
         </a-form-item>
+        <a-form-item
+          v-if="editForm.access_level === 'knowledge' || editForm.identity_scope === 'app'"
+          label="APP 标识"
+          :required="editForm.access_level !== 'knowledge'"
+        >
+          <a-input
+            v-model:value="editForm.app_id"
+            :maxlength="64"
+            placeholder="如：customer-service"
+          />
+        </a-form-item>
+        <a-alert
+          v-if="editForm.access_level === 'agents'"
+          type="info"
+          :message="
+            editForm.identity_scope === 'self'
+              ? '可访问本人已有的可见会话和工作区，并通过 Agent 使用已授权工具；不限于此 Key 新建的会话，也不是只读凭据。'
+              : '会话和工作区属于 APP 的独立终端用户；未声明终端用户时使用该 APP 的默认终端用户。'
+          "
+          show-icon
+          class="scope-notice"
+        />
         <a-alert
           v-if="editForm.access_level === 'full'"
           type="warning"
@@ -198,7 +262,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { computed, ref, reactive, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { Plus, RefreshCw, Trash2, Copy, Pencil } from '@lucide/vue'
 import { Key as KeyIcon } from '@lucide/vue'
@@ -223,7 +287,7 @@ const columns = [
   { title: '名称', dataIndex: 'name', key: 'name', width: 180 },
   { title: '前缀', dataIndex: 'key_prefix', key: 'prefix', width: 140 },
   { title: '权限', dataIndex: 'access_level', key: 'access', width: 130 },
-  { title: '来源', dataIndex: 'app_id', key: 'app', width: 150 },
+  { title: '身份 / APP', dataIndex: 'app_id', key: 'app', width: 150 },
   { title: '状态', dataIndex: 'is_enabled', key: 'status', width: 80 },
   { title: '最后使用', dataIndex: 'last_used_at', key: 'lastUsed', width: 140 },
   { title: '过期时间', dataIndex: 'expires_at', key: 'expiresAt', width: 130 },
@@ -234,9 +298,26 @@ const createForm = reactive({
   name: '',
   expires_at: null,
   access_level: 'agents',
+  identity_scope: 'self',
   app_id: ''
 })
-const editForm = reactive({ access_level: 'agents', app_id: '' })
+const editForm = reactive({ access_level: 'agents', identity_scope: 'self', app_id: '' })
+const createAppId = computed(() =>
+  createForm.access_level === 'knowledge' || createForm.identity_scope === 'app'
+    ? createForm.app_id || null
+    : null
+)
+const editAppId = computed(() =>
+  editForm.access_level === 'knowledge' || editForm.identity_scope === 'app'
+    ? editForm.app_id || null
+    : null
+)
+const editScopeChanged = computed(
+  () =>
+    editingKey.value &&
+    editForm.access_level !== 'knowledge' &&
+    editAppId.value !== editingKey.value.app_id
+)
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 
 const accessLevelLabel = (level) => ({
@@ -294,6 +375,7 @@ const showCreateModal = () => {
   createForm.name = ''
   createForm.expires_at = null
   createForm.access_level = 'agents'
+  createForm.identity_scope = 'self'
   createForm.app_id = ''
   createRequestId.value =
     sessionStorage.getItem(CREATE_REQUEST_STORAGE_KEY) ||
@@ -314,7 +396,12 @@ const handleCreate = async () => {
     message.error('请输入名称')
     return
   }
-  if (!validAppId(createForm.app_id, createForm.access_level === 'agents')) {
+  if (
+    !validAppId(
+      createAppId.value,
+      createForm.access_level !== 'knowledge' && createForm.identity_scope === 'app'
+    )
+  ) {
     message.error('来源须为 1–64 位字母、数字、点、下划线、冒号或短横线，且以字母或数字开头')
     return
   }
@@ -325,7 +412,7 @@ const handleCreate = async () => {
       name: createForm.name,
       request_id: createRequestId.value,
       access_level: createForm.access_level,
-      app_id: createForm.app_id || null
+      app_id: createAppId.value
     }
     if (createForm.expires_at) {
       data.expires_at = createForm.expires_at.format('YYYY-MM-DDTHH:mm:ss')
@@ -349,12 +436,18 @@ const openEdit = (key) => {
   editingKey.value = key
   editForm.access_level = key.access_level
   editForm.app_id = key.app_id || ''
+  editForm.identity_scope = key.app_id ? 'app' : 'self'
   editModalVisible.value = true
 }
 
 const handleEdit = async () => {
   if (!editingKey.value) return
-  if (!validAppId(editForm.app_id, editForm.access_level === 'agents')) {
+  if (
+    !validAppId(
+      editAppId.value,
+      editForm.access_level !== 'knowledge' && editForm.identity_scope === 'app'
+    )
+  ) {
     message.error('请填写有效的调用来源')
     return
   }
@@ -362,7 +455,7 @@ const handleEdit = async () => {
   try {
     await apikeyApi.update(editingKey.value.id, {
       access_level: editForm.access_level,
-      app_id: editForm.app_id || null
+      app_id: editAppId.value
     })
     editModalVisible.value = false
     message.success('权限已更新')
@@ -409,6 +502,10 @@ onMounted(() => {
 </script>
 
 <style lang="less" scoped>
+.scope-notice {
+  margin-bottom: 16px;
+}
+
 .apikey-management {
   .code-badge {
     font-family: 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;

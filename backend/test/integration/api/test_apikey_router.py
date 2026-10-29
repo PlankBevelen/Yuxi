@@ -537,3 +537,92 @@ async def test_app_overview_counts_app_keys_and_end_users(test_client, admin_hea
             await db.commit()
         deleted = await test_client.delete(f"{API_KEYS_PATH}{created['id']}", headers=admin_headers)
         assert deleted.status_code == 200, deleted.text
+
+
+async def test_agents_key_app_update_requires_explicit_null(test_client, admin_headers, api_key_factory, postgres_sessions):
+    """省略 APP 保留绑定；显式 null 切换本人，历史会话不迁移且原创建意图仍可重放。"""
+    from test.integration.api.helpers import delete_created_threads
+
+    app_id = f"edit-scope-{uuid.uuid4().hex}"
+    payload = {**_create_payload("Editable agents key"), "access_level": "agents", "app_id": app_id}
+    issued = await api_key_factory(payload)
+    thread_id = None
+    try:
+        created = await test_client.post(
+            "/api/v1/agents/sessions",
+            json={"agent_id": "default-chatbot"},
+            headers={**issued.headers, "Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert created.status_code == 201, created.text
+        thread_id = created.json()["id"]
+        async with postgres_sessions() as db:
+            original = await db.scalar(select(Session).where(Session.thread_id == thread_id))
+            original_binding = (original.uid, original.app_id, original.project_id)
+
+        for updates in ({"name": "Renamed agents key"}, {"access_level": "agents"}):
+            response = await test_client.put(f"{API_KEYS_PATH}{issued.key_id}", json=updates, headers=admin_headers)
+            assert response.status_code == 200, response.text
+            async with postgres_sessions() as db:
+                assert (await db.get(APIKey, issued.key_id)).app_id == app_id
+            visible = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=issued.headers)
+            assert visible.status_code == 200 and visible.json()["id"] == thread_id
+
+        switched = await test_client.put(f"{API_KEYS_PATH}{issued.key_id}", json={"app_id": None}, headers=admin_headers)
+        assert switched.status_code == 200, switched.text
+        async with postgres_sessions() as db:
+            key = await db.get(APIKey, issued.key_id)
+            stored = await db.scalar(select(Session).where(Session.thread_id == thread_id))
+            assert key.app_id is None and key.access_level == "agents"
+            assert (stored.uid, stored.app_id, stored.project_id) == original_binding
+        hidden = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=issued.headers)
+        assert hidden.status_code == 404, hidden.text
+
+        replay = await test_client.post(API_KEYS_PATH, json=payload, headers=admin_headers)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["secret"] == issued.response.json()["secret"]
+        assert replay.json()["api_key"]["app_id"] is None
+        async with postgres_sessions() as db:
+            assert (await db.get(APIKey, issued.key_id)).app_id is None
+
+        rebound = await test_client.put(f"{API_KEYS_PATH}{issued.key_id}", json={"app_id": app_id}, headers=admin_headers)
+        assert rebound.status_code == 200, rebound.text
+        restored = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=issued.headers)
+        assert restored.status_code == 200 and restored.json()["id"] == thread_id
+    finally:
+        await delete_created_threads(thread_id)
+
+
+@pytest.mark.parametrize("key_state", ["disabled", "expired", "revoked"])
+async def test_personal_agents_key_lifecycle_blocks_auth_and_replay_does_not_restore(
+    test_client, admin_headers, api_key_factory, postgres_sessions, key_state
+):
+    """本人受限 Key 的失效状态由持久事实执行，创建重放不能重新启用凭据。"""
+    payload = {**_create_payload("Personal lifecycle"), "access_level": "agents"}
+    issued = await api_key_factory(payload)
+    catalog = await test_client.get("/api/v1/agents", headers=issued.headers)
+    assert catalog.status_code == 200 and isinstance(catalog.json()["data"], list)
+    if key_state == "revoked":
+        changed = await test_client.delete(f"{API_KEYS_PATH}{issued.key_id}", headers=admin_headers)
+    else:
+        updates = {"is_enabled": False} if key_state == "disabled" else {"expires_at": (utc_now() - timedelta(days=1)).isoformat()}
+        changed = await test_client.put(f"{API_KEYS_PATH}{issued.key_id}", json=updates, headers=admin_headers)
+    assert changed.status_code == 200, changed.text
+
+    replay = await test_client.post(API_KEYS_PATH, json=payload, headers=admin_headers)
+    assert replay.status_code == (409 if key_state == "revoked" else 200), replay.text
+    if key_state == "revoked":
+        assert "secret" not in replay.json()
+    else:
+        assert replay.json()["secret"] == issued.response.json()["secret"]
+    rejected = await test_client.get("/api/v1/agents", headers=issued.headers)
+    assert rejected.status_code == 401, rejected.text
+    async with postgres_sessions() as db:
+        stored = await db.get(APIKey, issued.key_id)
+        assert stored.app_id is None and stored.access_level == "agents"
+        assert stored.is_valid() is False
+        if key_state == "disabled":
+            assert stored.is_enabled is False
+        elif key_state == "expired":
+            assert stored.expires_at < utc_now()
+        else:
+            assert stored.revoked_at is not None and stored.is_enabled is False

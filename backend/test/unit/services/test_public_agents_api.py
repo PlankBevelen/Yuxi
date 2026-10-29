@@ -22,29 +22,21 @@ def test_creation_key_is_stable_and_isolated_by_app():
 
 
 @pytest.mark.asyncio
-async def test_unbound_full_key_uses_product_user_without_end_user():
-    """CLI 浏览器登录的完整 Key 可进入产品 Thread 作用域。"""
-    owner = SimpleNamespace(uid="owner-1", role="user")
-    key = SimpleNamespace(id=17, access_level="full", app_id=None)
+@pytest.mark.parametrize("access_level", ["full", "agents"])
+async def test_unbound_key_uses_owner_scope_without_jwt_admin_privileges(access_level):
+    """本人 Key 沿用产品作用域，但不能声明终端用户或继承 JWT 管理权限。"""
+    owner = SimpleNamespace(uid="owner-1", role="superadmin")
+    key = SimpleNamespace(id=17, access_level=access_level, app_id=None)
     request = SimpleNamespace(state=SimpleNamespace(api_key=key))
     context = await require_public_context(request, end_user_id=None, owner=owner, db=object())
     assert context.user is owner
-    assert context.scope == ActorScope(uid="owner-1", app_id=None, api_key_id=17)
+    assert context.scope == ActorScope(uid="owner-1", app_id=None, api_key_id=17, is_superadmin=False)
 
-    with pytest.raises(HTTPException) as exc:
-        await require_public_context(request, end_user_id="spoofed", owner=owner, db=object())
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_unbound_agents_key_still_cannot_enter_public_agent_scope():
-    """受限 Key 不得借无 APP 的完整 Key 路径越权。"""
-    owner = SimpleNamespace(uid="owner-1", role="user")
-    key = SimpleNamespace(id=18, access_level="agents", app_id=None)
-    request = SimpleNamespace(state=SimpleNamespace(api_key=key))
-    with pytest.raises(HTTPException) as exc:
-        await require_public_context(request, end_user_id=None, owner=owner, db=object())
-    assert exc.value.status_code == 403
+    for end_user_id in ("spoofed", owner.uid, ""):
+        with pytest.raises(HTTPException) as exc:
+            await require_public_context(request, end_user_id=end_user_id, owner=owner, db=object())
+        assert exc.value.status_code == 403
+        assert exc.value.detail == "本人身份的 Key 不接受 X-End-User-Id"
 
 
 def test_multimodal_input_keeps_part_order_and_image_media_type():

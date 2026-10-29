@@ -36,7 +36,7 @@ async def require_public_context(
     owner: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ) -> PublicAgentContext:
-    """将产品 JWT、完整 Key 和 APP Key 映射到各自的用户作用域。"""
+    """将产品 JWT、本人 Key 和 APP Key 映射到各自的用户作用域。"""
     api_key = getattr(request.state, "api_key", None)
     try:
         user = await resolve_public_user(owner=owner, api_key=api_key, end_user_id=end_user_id, db=db)

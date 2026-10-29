@@ -15,9 +15,10 @@ from yuxi.modules.workspace.runtime_paths import runtime_workspace_path
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
-async def test_unbound_full_key_uses_owners_product_thread_scope(test_client, admin_headers, api_key_factory):
-    """CLI 登录签发的完整 Key 可创建产品 Thread，且不能伪造终端用户。"""
-    created_key = await api_key_factory({"request_id": str(uuid.uuid4()), "name": "CLI product scope", "access_level": "full"})
+@pytest.mark.parametrize("access_level", ["full", "agents"])
+async def test_unbound_key_uses_owners_product_thread_scope(test_client, admin_headers, api_key_factory, access_level):
+    """本人 Key 与 JWT 共享会话、Project 和 Workspace，不能伪造终端身份。"""
+    created_key = await api_key_factory({"request_id": str(uuid.uuid4()), "name": "Personal product scope", "access_level": access_level})
     assert created_key.response.json()["api_key"]["app_id"] is None
     key_headers = created_key.headers
     thread_id = None
@@ -33,11 +34,69 @@ async def test_unbound_full_key_uses_owners_product_thread_scope(test_client, ad
         assert from_jwt.status_code == 200, from_jwt.text
         assert from_jwt.json()["id"] == thread_id
 
-        forged = await test_client.get(
-            f"/api/v1/agents/sessions/{thread_id}",
-            headers={**key_headers, "X-End-User-Id": "other-user"},
+        me = await test_client.get("/api/auth/me", headers=admin_headers)
+        assert me.status_code == 200, me.text
+        conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+        try:
+            stored = await conn.fetchrow(
+                "SELECT s.uid, s.app_id, p.uid AS project_uid, p.workdir_path, u.user_kind "
+                "FROM sessions s JOIN projects p ON p.id = s.project_id "
+                "JOIN users u ON u.uid = s.uid WHERE s.thread_id = $1",
+                thread_id,
+            )
+        finally:
+            await conn.close()
+        assert stored["uid"] == stored["project_uid"] == me.json()["uid"]
+        assert stored["app_id"] is None and stored["user_kind"] == "human"
+        assert stored["workdir_path"]
+        workspace = Workspace(stored["uid"])
+        file_path = f"/{stored['workdir_path'].strip('/')}/personal-key.txt"
+        workspace.replace_authorized_file(file_path, b"owner workspace content")
+        try:
+            runtime_path = runtime_workspace_path(file_path)
+            for headers in (key_headers, admin_headers):
+                artifact = await test_client.get(
+                    f"/api/v1/agents/sessions/{thread_id}/artifacts/{runtime_path.lstrip('/')}", headers=headers
+                )
+                assert artifact.status_code == 200 and artifact.content == b"owner workspace content"
+        finally:
+            workspace.delete_authorized_path(file_path, root="/")
+
+        updated = await test_client.put(
+            f"/api/user/apikey/{created_key.key_id}", json={"access_level": "agents"}, headers=admin_headers
         )
-        assert forged.status_code == 403, forged.text
+        assert updated.status_code == 200 and updated.json()["api_key"]["app_id"] is None
+        accessible = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=key_headers)
+        assert accessible.status_code == 200 and accessible.json()["id"] == thread_id
+
+        for identity in ("other-user", me.json()["uid"], ""):
+            forged = await test_client.get(
+                f"/api/v1/agents/sessions/{thread_id}",
+                headers={**key_headers, "X-End-User-Id": identity},
+            )
+            assert forged.status_code == 403, forged.text
+            assert forged.json()["detail"] == "本人身份的 Key 不接受 X-End-User-Id"
+
+        another_key = await api_key_factory({"request_id": str(uuid.uuid4()), "name": "Same owner", "access_level": "agents"})
+        shared = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=another_key.headers)
+        assert shared.status_code == 200 and shared.json()["id"] == thread_id
+        creation_id = str(uuid.uuid4())
+        jwt_created = await test_client.post(
+            "/api/v1/agents/sessions",
+            json={"agent_id": "default-chatbot"},
+            headers={**admin_headers, "Idempotency-Key": creation_id},
+        )
+        assert jwt_created.status_code == 201, jwt_created.text
+        jwt_thread_id = jwt_created.json()["id"]
+        try:
+            replay = await test_client.post(
+                "/api/v1/agents/sessions",
+                json={"agent_id": "default-chatbot"},
+                headers={**key_headers, "Idempotency-Key": creation_id},
+            )
+            assert replay.status_code == 201 and replay.json()["id"] == jwt_thread_id
+        finally:
+            await delete_created_threads(jwt_thread_id)
     finally:
         await delete_created_threads(thread_id)
 
@@ -138,13 +197,6 @@ async def test_agents_key_cannot_use_product_routes_or_spoof_source(test_client,
 
 async def test_public_api_accepts_product_jwt_without_end_user_impersonation(test_client, admin_headers):
     """产品 JWT 可使用 Public，但不能声明 APP 的终端用户。"""
-    missing = await test_client.post(
-        "/api/user/apikey/",
-        json={"request_id": str(uuid.uuid4()), "name": "No app", "access_level": "agents"},
-        headers=admin_headers,
-    )
-    assert missing.status_code == 422, missing.text
-
     jwt = await test_client.get("/api/v1/agents", headers=admin_headers)
     assert jwt.status_code == 200, jwt.text
     assert "X-App-Id" not in jwt.headers
@@ -280,3 +332,68 @@ async def test_public_message_preflight_allows_idempotency_key(test_client, path
     assert response.headers["access-control-allow-origin"] == origin
     assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
     assert "x-end-user-id" in response.headers["access-control-allow-headers"].lower()
+
+
+async def test_personal_agents_key_rejects_cross_user_management_and_audits(test_client, admin_headers, api_key_factory, postgres_sessions):
+    """即使 Key 属于超管，也不能管理产品、读取审计或访问其他用户的会话。"""
+    from sqlalchemy import select
+    from yuxi.modules.identity.models import APIKey
+
+    owner = await test_client.get("/api/auth/me", headers=admin_headers)
+    assert owner.status_code == 200 and owner.json()["role"] == "superadmin"
+    issued = await api_key_factory({"request_id": str(uuid.uuid4()), "name": "Restricted admin", "access_level": "agents"})
+    other_user = await test_client.post(
+        "/api/auth/users",
+        json={
+            "username": f"key_scope_{uuid.uuid4().hex[:8]}",
+            "password": "boundaryTest123!",
+            "role": "user",
+            "department_id": owner.json()["department_id"],
+        },
+        headers=admin_headers,
+    )
+    assert other_user.status_code == 200, other_user.text
+    thread_id = None
+    try:
+        other_key = await api_key_factory(
+            {"request_id": str(uuid.uuid4()), "name": "Other user", "access_level": "agents", "user_id": other_user.json()["id"]}
+        )
+        created = await test_client.post(
+            "/api/v1/agents/sessions",
+            json={"agent_id": "default-chatbot"},
+            headers={**issued.headers, "Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert created.status_code == 201, created.text
+        thread_id = created.json()["id"]
+        for suffix in ("", "/items"):
+            foreign = await test_client.get(f"/api/v1/agents/sessions/{thread_id}{suffix}", headers=other_key.headers)
+            assert foreign.status_code == 404, foreign.text
+        denied_write = await test_client.post(
+            f"/api/v1/agents/sessions/{thread_id}", json={"yuxi": {"title": "Forged title"}}, headers=other_key.headers
+        )
+        assert denied_write.status_code == 404, denied_write.text
+        for path in ("/api/agent", "/api/user/apikey/", "/api/system/config", "/api/system/logs"):
+            denied = await test_client.get(path, headers=issued.headers)
+            assert denied.status_code == 403, (path, denied.text)
+            assert denied.json()["detail"] == "该 API Key 无权访问此 API 面"
+        denied_update = await test_client.put(
+            f"/api/user/apikey/{issued.key_id}", json={"name": "Forged name", "access_level": "full"}, headers=issued.headers
+        )
+        assert denied_update.status_code == 403, denied_update.text
+        denied_create = await test_client.post(
+            "/api/user/apikey/", json={"request_id": str(uuid.uuid4()), "name": "Forbidden creation"}, headers=issued.headers
+        )
+        assert denied_create.status_code == 403, denied_create.text
+        audits = await test_client.get(f"/api/v1/agents/sessions/{thread_id}/audits", headers=issued.headers)
+        assert audits.status_code == 403 and audits.json()["detail"] == "无权读取模型与工具审计"
+        jwt_audits = await test_client.get(f"/api/v1/agents/sessions/{thread_id}/audits", headers=admin_headers)
+        assert jwt_audits.status_code == 200 and jwt_audits.json()["audits"] == []
+        async with postgres_sessions() as db:
+            key = await db.get(APIKey, issued.key_id)
+            assert key.name == "Restricted admin" and key.access_level == "agents"
+            assert await db.scalar(select(APIKey.id).where(APIKey.name == "Forbidden creation")) is None
+        unchanged = await test_client.get(f"/api/v1/agents/sessions/{thread_id}", headers=admin_headers)
+        assert unchanged.status_code == 200 and unchanged.json()["yuxi"]["title"] != "Forged title"
+    finally:
+        await delete_created_threads(thread_id)
+        await test_client.delete(f"/api/auth/users/{other_user.json()['id']}", headers=admin_headers)

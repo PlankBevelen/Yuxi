@@ -51,7 +51,7 @@
           <div class="integration-section-title">对外端点</div>
           <p class="integration-section-hint">
             智能体端点使用 agents 或 full Key；知识库端点使用 knowledge 或 full Key。
-            智能体调用通过 X-End-User-Id 区分 APP 终端用户，提交时需提供 Idempotency-Key。
+            本人身份的 Key 不传 X-End-User-Id；绑定 APP 的 Key 可用该请求头区分终端用户。提交时需提供 Idempotency-Key。
           </p>
           <div class="settings-table-wrapper">
             <a-table

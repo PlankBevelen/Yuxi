@@ -9,7 +9,7 @@ from yuxi.modules.identity.models import APIKey, User
 from yuxi.modules.identity.repositories.api_keys import APIKeyRepository
 from yuxi.modules.identity.security import AuthUtils
 from yuxi.shared.datetime import coerce_any_to_utc_datetime
-from yuxi.shared.errors import InvalidInputError, PermissionDeniedError, ResourceNotFoundError
+from yuxi.shared.errors import PermissionDeniedError, ResourceNotFoundError
 
 
 async def create_api_key(
@@ -28,8 +28,6 @@ async def create_api_key(
     try:
         if user_id and user_id != actor.id and actor.role != "superadmin":
             raise PermissionDeniedError("无权为其他用户创建 API Key")
-        if access_level == "agents" and not app_id:
-            raise InvalidInputError("Agents API Key 必须填写 app_id")
         key, secret = await issue_api_key(
             db,
             derivation_context=f"user-request:{request_id}",
@@ -105,8 +103,6 @@ async def update_api_key(db: AsyncSession, *, actor: User, api_key_id: int, upda
     """校验合并后的凭据能力并提交变更。"""
     try:
         key = await get_accessible_api_key(APIKeyRepository(db), api_key_id, actor)
-        if (updates.get("access_level") or key.access_level) == "agents" and not updates.get("app_id", key.app_id):
-            raise InvalidInputError("Agents API Key 必须填写 app_id")
         updates = {name: value for name, value in updates.items() if value is not None or name == "app_id"}
         if "expires_at" in updates:
             updates["expires_at"] = coerce_any_to_utc_datetime(updates["expires_at"])
