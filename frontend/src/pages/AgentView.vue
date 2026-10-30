@@ -34,6 +34,7 @@ import { handleChatError } from '@/shared/lib/errorHandler'
 import { createThreadRouteCoordinator } from './agent/threadRouteCoordinator'
 
 const props = defineProps({
+  memberSessionId: { type: String, default: '' },
   threadId: { type: String, default: '' },
   agentId: { type: String, default: '' },
   projectId: { type: String, default: '' }
@@ -69,9 +70,9 @@ const coordinator = createThreadRouteCoordinator({
 })
 
 watch(
-  [workspaceRef, () => props.threadId, () => props.agentId, ownsCurrentRoute],
-  ([selection, threadId, agentId, ownsRoute]) => {
-    void coordinator.sync({ threadId, agentId }, ownsRoute ? selection : null)
+  [workspaceRef, () => props.threadId, () => props.agentId, () => props.memberSessionId, ownsCurrentRoute],
+  ([selection, threadId, agentId, memberSessionId, ownsRoute]) => {
+    void coordinator.sync({ threadId, agentId, memberSessionId }, ownsRoute ? selection : null)
   },
   { immediate: true }
 )

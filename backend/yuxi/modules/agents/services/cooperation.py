@@ -55,14 +55,16 @@ class SessionCooperationService:
         self.config_snapshot = config_snapshot
         self.repo = CooperationRepository(db)
 
-    async def create_session(self, *, name: str, description: str, call_id: str, agent_id: str | None = None) -> dict:
-        """以实际派发方为父节点，用局部名称生成直属子会话路径。"""
+    async def create_session(self, *, name: str, description: str, call_id: str, agent_id: str | None = None, mode: str = "child") -> dict:
+        """创建直属成员或继承当前项目的独立顶层会话。"""
+        if mode not in {"child", "root"}:
+            raise ValueError("创建模式必须是 child 或 root")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) or not description.strip():
             raise ValueError("name 只接受 1-64 位字母、数字、下划线或连字符，不接受路径；任务描述不能为空")
         run, caller = await self.caller()
         # 同一 Turn 可经多个恢复 Run 重放工具，副作用身份不能随执行段改变。
         child_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"yuxi-session:{run.turn_id}:{call_id}"))
-        path = f"{caller.cooperation_path}/{name}"
+        path = f"{caller.cooperation_path}/{name}" if mode == "child" else "/root"
         if len(path) > 1024:
             raise ValueError("Session 路径超过 1024 字符")
         # 共同锁序沿用 Agent → Project → Session；显式选择仍按持久执行用户授权。
@@ -86,7 +88,7 @@ class SessionCooperationService:
                 raise InvalidOperationError(
                     f"协作深度 {depth} 超过最大协作深度 {maximum}，无法创建新的协作会话", code="cooperation_depth_exceeded"
                 )
-            if await self.repo.resolve(caller, path) is not None:
+            if mode == "child" and await self.repo.resolve(caller, path) is not None:
                 raise ValueError("同父 Session 下名称已存在")
             run_snapshot = run.input_payload["context_snapshot"]
             if agent_id is None:
@@ -101,8 +103,8 @@ class SessionCooperationService:
                 )
             child = Session(
                 thread_id=child_id,
-                tree_root_thread_id=caller.tree_root_thread_id,
-                parent_thread_id=caller.thread_id,
+                tree_root_thread_id=caller.tree_root_thread_id if mode == "child" else child_id,
+                parent_thread_id=caller.thread_id if mode == "child" else None,
                 cooperation_name=name,
                 cooperation_path=path,
                 created_by_run_id=run.id,
@@ -117,13 +119,18 @@ class SessionCooperationService:
             )
             self.db.add(child)
             await self.db.flush()
-        elif child.cooperation_path != path or child.agent_id != selected_agent_id:
-            raise ValueError("幂等创建请求的名称或 Agent 已变化")
+        elif (
+            child.cooperation_path != path
+            or child.cooperation_name != name
+            or child.parent_thread_id != (caller.thread_id if mode == "child" else None)
+            or child.agent_id != selected_agent_id
+        ):
+            raise ValueError("幂等创建请求的名称、模式或 Agent 已变化")
         payload = await self._accept(target=child, description=description, call_id=call_id)
-        return {**session_identity(child), **payload}
+        return {**session_identity(child), "project_id": child.project_id, **payload}
 
     async def submit_input(self, *, target: str, description: str, call_id: str) -> dict:
-        """同树提交新工作，审批等待明确拒绝，普通忙碌状态持久排队。"""
+        """提交授权会话的新工作，审批等待拒绝，普通忙碌状态持久排队。"""
         if not description.strip():
             raise ValueError("工作输入不能为空")
         _, caller = await self.caller()
@@ -151,9 +158,9 @@ class SessionCooperationService:
         return {"status": "received", "message_id": event.id, "session_id": member.thread_id}
 
     async def list_sessions(self) -> dict:
-        """返回树内成员及各自当前轮次和输入队列。"""
+        """返回当前用户和 APP 的全部会话及进度。"""
         _, caller = await self.caller()
-        return await tree_snapshot(self.db, caller)
+        return await tree_snapshot(self.db, caller, all_sessions=True)
 
     async def list_agents(self) -> dict:
         """复用公开目录的可调用范围，只输出最小角色信息。"""
@@ -189,7 +196,7 @@ class SessionCooperationService:
         }
 
     async def cancel_turn(self, *, target: str, turn_id: str, call_id: str) -> dict:
-        """取消精确目标 Turn，控制权限允许树内任意成员。"""
+        """取消精确目标 Turn，控制权限覆盖当前用户和 APP 的会话。"""
         _, caller = await self.caller()
         member = await self.require_target(caller, target)
 
@@ -281,10 +288,10 @@ class SessionCooperationService:
         return run, caller
 
     async def require_target(self, caller: Session, target: str) -> Session:
-        """在产生副作用前收敛树与用户/APP 可见范围。"""
+        """在产生副作用前收敛用户与 APP 可见范围。"""
         member = await self.repo.resolve(caller, target)
         if member is None:
-            raise ValueError("目标 Session 不存在或不属于当前授权树")
+            raise ValueError("目标 Session 不存在或不属于当前用户与 APP 授权范围")
         return member
 
     async def _accept(self, *, target: Session, description: str, call_id: str) -> dict:
@@ -374,14 +381,15 @@ def session_identity(member: Session) -> dict:
     }
 
 
-async def tree_snapshot(db, caller: Session) -> dict:
+async def tree_snapshot(db, caller: Session, *, all_sessions: bool = False) -> dict:
     """返回完整协作摘要；结果正文由精确任务查询拥有。"""
-    rows = await CooperationRepository(db).summary(caller)
+    rows = await CooperationRepository(db).summary(caller, all_sessions=all_sessions)
     return {
         "tree_root_session_id": caller.tree_root_thread_id,
         "sessions": [
             {
                 **session_identity(member),
+                **({"project_id": member.project_id} if all_sessions else {}),
                 "title": member.title,
                 "status": member.status,
                 "queue_paused": member.queue_paused,
@@ -409,7 +417,7 @@ async def read_task_results(db, caller: Session, *, input_ids: list[str] | None 
     """从 Input 到精确 Turn/Run 回读任务结果及可观察终态。"""
     rows = await CooperationRepository(db).task_rows(caller, input_ids=input_ids, turn_id=turn_id)
     if not rows or (input_ids is not None and {row[1].id for row in rows} != set(input_ids)):
-        raise ValueError("任务不存在或不属于当前授权树")
+        raise ValueError("任务不存在或不属于当前用户与 APP 授权范围")
     results = []
     for member, input_item, turn, run, message in rows:
         if message and (message.turn_id != turn.id or message.run_id != run.id or message.session_record_id != member.id):
@@ -437,24 +445,7 @@ async def read_task_results(db, caller: Session, *, input_ids: list[str] | None 
 
 async def read_updates(db, caller: Session, *, targets: list[str], after: int) -> dict:
     """等待可观察目标自身状态及发送给调用者的消息。"""
-    from sqlalchemy import and_, or_
-
-    from yuxi.modules.agents.models.cooperation import CooperationEvent
-
-    query = select(CooperationEvent).where(
-        CooperationEvent.tree_root_thread_id == caller.tree_root_thread_id,
-        CooperationEvent.id > after,
-        or_(
-            and_(
-                CooperationEvent.kind == "turn_status",
-                CooperationEvent.recipient_thread_id == CooperationEvent.sender_thread_id,
-            ),
-            and_(CooperationEvent.kind != "turn_status", CooperationEvent.recipient_thread_id == caller.thread_id),
-        ),
-    )
-    if targets:
-        query = query.where(CooperationEvent.sender_thread_id.in_(targets))
-    events = list((await db.scalars(query.order_by(CooperationEvent.id).limit(100))).all())
+    events = await CooperationRepository(db).updates(caller, targets=targets, after=after)
     return {
         "updates": [
             {

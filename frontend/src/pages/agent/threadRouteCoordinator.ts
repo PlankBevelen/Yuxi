@@ -1,10 +1,12 @@
 export interface SessionRoute {
   threadId: string
   agentId: string
+  memberSessionId?: string
 }
 
 export interface SessionSelection {
   selectThreadFromRoute(threadId: string): Promise<boolean | null>
+  openSessionFromRoute(sessionId: string): Promise<void>
 }
 
 interface RouteActions {
@@ -36,6 +38,10 @@ export function createThreadRouteCoordinator(actions: RouteActions) {
         if (!isCurrent()) return
         const selected = await selection.selectThreadFromRoute(threadId)
         if (!isCurrent() || selected === null) return
+        if (selected && target.memberSessionId !== undefined) {
+          await selection.openSessionFromRoute(target.memberSessionId)
+          if (!isCurrent()) return
+        }
         if (threadId && !selected) {
           await actions.rejectThread()
         } else if (!threadId && agentId) {

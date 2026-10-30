@@ -318,3 +318,83 @@ async def test_tree_resume_rejects_unconfirmed_cleanup_without_mutating_queue(te
             await db.execute(delete(Project).where(Project.id == project_id))
             await db.commit()
         await engine.dispose()
+
+
+@pytest.mark.self_managed_resources
+async def test_web_input_origins_and_navigation_reject_other_users(test_client, cooperation_user, admin_headers):
+    """真实 HTTP 返回持久来源与层级，对其他用户连会话身份也不公开。"""
+    uid = cooperation_user["user"]["uid"]
+    project_id, root_id, child_id, input_id = [str(uuid.uuid4()) for _ in range(4)]
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as db:
+            db.add(
+                Project(
+                    id=project_id, uid=uid, selection_status="implicit", workdir_path=f"projects/{project_id}", directory_mode="managed"
+                )
+            )
+            await db.flush()
+            db.add(
+                Session(
+                    thread_id=root_id,
+                    uid=uid,
+                    project_id=project_id,
+                    agent_id="origin-test",
+                    title="来源测试",
+                    config_snapshot={"model": "test:mock", "tool_approval_mode": "default"},
+                )
+            )
+            await db.flush()
+            db.add(
+                Session(
+                    thread_id=child_id,
+                    uid=uid,
+                    project_id=project_id,
+                    agent_id="origin-test",
+                    tree_root_thread_id=root_id,
+                    parent_thread_id=root_id,
+                    cooperation_path="/root/member",
+                    cooperation_name="member",
+                )
+            )
+            await db.flush()
+            db.add(
+                AgentInput(
+                    id=input_id,
+                    thread_id=child_id,
+                    uid=uid,
+                    agent_slug="origin-test",
+                    kind="follow_up",
+                    messages=[serialize_input_message(build_chat_input_message("scheduled task"))],
+                    source="scheduled_agent",
+                )
+            )
+            await db.commit()
+        path = f"/api/agent/threads/{child_id}"
+        own = cooperation_user["headers"]
+        origins = await test_client.get(path + "/input-origins", params={"input_ids": input_id}, headers=own)
+        assert origins.status_code == 200, origins.text
+        assert origins.json() == {"origins": {input_id: {"kind": "schedule", "label": "定时任务", "target": None}}}
+        navigation = await test_client.get(path + "/navigation", headers=own)
+        assert navigation.status_code == 200, navigation.text
+        assert navigation.json() == {
+            "session_id": child_id,
+            "tree_root_session_id": root_id,
+            "parent_session_id": root_id,
+            "name": "member",
+        }
+        for endpoint, params in [("/input-origins", {"input_ids": input_id}), ("/navigation", {})]:
+            denied = await test_client.get(path + endpoint, params=params, headers=admin_headers)
+            assert denied.status_code == 404, denied.text
+            assert child_id not in denied.text and "member" not in denied.text
+        foreign_input = await test_client.get(f"/api/agent/threads/{root_id}/input-origins", params={"input_ids": input_id}, headers=own)
+        assert foreign_input.status_code == 200 and foreign_input.json() == {"origins": {}}
+    finally:
+        async with sessions() as db:
+            await db.execute(delete(AgentInput).where(AgentInput.id == input_id))
+            await db.execute(delete(Session).where(Session.thread_id == child_id))
+            await db.execute(delete(Session).where(Session.thread_id == root_id))
+            await db.execute(delete(Project).where(Project.id == project_id))
+            await db.commit()
+        await engine.dispose()

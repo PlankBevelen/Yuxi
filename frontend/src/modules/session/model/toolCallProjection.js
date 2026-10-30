@@ -1,11 +1,11 @@
 export const TOOL_NAME_MAP = {
-  create_session: '创建协作会话',
+  create_session: '创建会话',
   send_message: '投递协作消息',
   submit_input: '提交工作',
   cancel_turn: '取消轮次',
   wait_sessions: '等待协作更新',
   wait_inputs: '等待任务结果',
-  list_sessions: '查看协作树',
+  list_sessions: '查看会话',
   bash: '执行命令',
   cmd: '执行命令',
   execute: '执行命令',

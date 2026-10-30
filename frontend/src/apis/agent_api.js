@@ -11,6 +11,18 @@ import { getApiAuthHeaders } from './auth_context'
 // === 智能体聊天分组 ===
 // =============================================================================
 
+/** Web 来源与公开 item 分开读取，持久输入身份是唯一关联键。 */
+async function attachInputOrigins(threadId, items) {
+  const inputIds = [...new Set(items.filter((item) => item.role === 'user').map((item) => item.yuxi?.input_id).filter(Boolean))]
+  if (!inputIds.length) return
+  const params = new URLSearchParams()
+  for (const id of inputIds) params.append('input_ids', id)
+  const { origins } = await apiGet(`/api/agent/threads/${encodeURIComponent(threadId)}/input-origins?${params}`)
+  for (const item of items) {
+    if (item.role === 'user') item.yuxi.input_origin = origins[item.yuxi.input_id] || null
+  }
+}
+
 export const agentApi = {
   /**
    * 获取智能体列表
@@ -41,11 +53,13 @@ export const agentApi = {
   getAgentDetail: (agentId) => apiGet(`/api/agent/${agentId}`),
 
   /** 直接读取公开内容页，轮次恢复可限定 Turn。 */
-  getSessionItems: (threadId, { after, turnId, limit = 100, order = 'desc' } = {}) => {
+  getSessionItems: async (threadId, { after, turnId, limit = 100, order = 'desc' } = {}) => {
     const params = new URLSearchParams({ limit: String(limit), order })
     if (after) params.set('after', after)
     const path = turnId ? `/turns/${encodeURIComponent(turnId)}/items` : '/items'
-    return apiGet(`/api/v1/agents/sessions/${threadId}${path}?${params}`)
+    const page = await apiGet(`/api/v1/agents/sessions/${threadId}${path}?${params}`)
+    await attachInputOrigins(threadId, page.data)
+    return page
   },
 
   getSessionReceipt: (threadId, key) =>
@@ -185,8 +199,14 @@ export const agentApi = {
   annotateTurnReferences: (threadId, turnId) =>
     apiPost(`/api/agent/threads/${threadId}/turns/${turnId}/references`),
 
-  getThreadInput: (threadId, inputId, options = {}) =>
-    apiGet(`/api/v1/agents/sessions/${threadId}/inputs/${inputId}`, options),
+  getThreadInput: async (threadId, inputId, options = {}) => {
+    const input = await apiGet(`/api/v1/agents/sessions/${threadId}/inputs/${inputId}`, options)
+    await attachInputOrigins(threadId, input.items || [])
+    return input
+  },
+
+  getSessionNavigation: (threadId) =>
+    apiGet(`/api/agent/threads/${encodeURIComponent(threadId)}/navigation`),
 
   streamThreadEvents: (threadId, afterCursor = null, { signal } = {}) => {
     const headers = {

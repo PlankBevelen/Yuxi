@@ -3,6 +3,7 @@ import { setImmediate } from 'node:timers'
 import test, { before, after } from 'node:test'
 import { createRenderer, h, KeepAlive, nextTick, reactive, ref, ssrContextKey } from 'vue'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter, routerKey } from 'vue-router'
 import { createTestServer } from '../helpers/createTestServer.js'
 
 const artifactPath = '/home/user/workspace/projects/demo/方案.html'
@@ -151,6 +152,7 @@ test('再次点击同名交付卡片使未知元数据缓存失效并触发面�
     return () => null
   } })
   app.use(pinia)
+  app.provide(routerKey, createRouter({ history: createMemoryHistory('/'), routes: [] }))
   app.provide(ssrContextKey, {})
   app.mount({ children: [] })
   t.after(() => { app.unmount(); disposePinia(pinia) })

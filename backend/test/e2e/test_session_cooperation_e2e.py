@@ -30,7 +30,7 @@ from test.e2e.e2e_helpers import (
 from test.e2e.e2e_helpers import (
     register_replay_provider as _provider,
 )
-from test.live_api_cleanup import make_test_session_title, validate_test_runs_terminal
+from test.live_api_cleanup import delete_test_session_resources, make_test_session_title, validate_test_runs_terminal
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.infrastructure.postgres.models import load_models
 from yuxi.modules.agents.runtime.sandbox import UserSandboxBackend, get_sandbox_provider
@@ -736,3 +736,120 @@ async def test_worker_rejects_third_cooperation_depth_and_commits_only_allowed_m
                     await archive_public_thread(e2e_client, e2e_headers, member["session_id"], turn_id=member["turn_id"])
             await archive_public_thread(e2e_client, e2e_headers, thread_id, turn_id=turn_id)
         await delete_agent(e2e_client, e2e_headers, slug)
+
+
+@pytest.mark.self_managed_resources
+@pytest.mark.parametrize("different_project", [False, True])
+async def test_independent_root_cooperation_uses_real_worker_and_persisted_origins(e2e_client, e2e_headers, different_project):
+    """通过模型工具创建独立根，再跨树投递与等待，来源从 HTTP 和数据库回读。"""
+    me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
+    uid = me.json()["uid"]
+    await _provider(e2e_client, e2e_headers, base_url=os.environ["COOPERATION_REPLAY_URL"], provider_id="cooperation-replay")
+    slug = await _agent(e2e_client, e2e_headers, uid, model_spec=MODEL)
+    root_id = target_id = turn_id = None
+    conn = await asyncpg.connect(postgres_dsn())
+    try:
+        response = await e2e_client.post(
+            "/api/v1/agents/sessions",
+            headers={**e2e_headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={
+                "agent_id": slug,
+                "title": make_test_session_title("user-scope-cooperation"),
+                "agent": {"model": MODEL},
+                "tool_approval_mode": "always_trust",
+            },
+        )
+        assert response.status_code == 201, response.text
+        root_id = response.json()["id"]
+        marker = "USER_SCOPE_ROOT PRIVATE_ROOT_HISTORY"
+        if different_project:
+            other = await e2e_client.post(
+                "/api/v1/agents/sessions",
+                headers={**e2e_headers, "Idempotency-Key": str(uuid.uuid4())},
+                json={
+                    "agent_id": slug,
+                    "title": make_test_session_title("cross-project-target"),
+                    "agent": {"model": MODEL},
+                    "tool_approval_mode": "always_trust",
+                },
+            )
+            assert other.status_code == 201, other.text
+            target_id = other.json()["id"]
+            marker += f" USER_SCOPE_EXISTING:{target_id}"
+        accepted = await e2e_client.post(
+            f"/api/v1/agents/sessions/{root_id}/events",
+            headers={**e2e_headers, "Idempotency-Key": str(uuid.uuid4())},
+            json={"events": [{"type": "agent.session.input.message", "input": [_message(marker)], "yuxi": {"mode": "follow_up"}}]},
+        )
+        assert accepted.status_code == 202, accepted.text
+        turn_id = (await wait_for_consumed_input(e2e_client, e2e_headers, accepted.json()))["turn_id"]
+        terminal = await wait_for_terminal_turn(e2e_client, e2e_headers, root_id, turn_id, timeout=180)
+        assert terminal["status"] == "completed", terminal
+        assert output_text(terminal["yuxi"]["output"]) == OUTPUT
+        if different_project:
+            target = await conn.fetchrow("SELECT * FROM sessions WHERE thread_id=$1", target_id)
+        else:
+            target = await conn.fetchrow(
+                "SELECT * FROM sessions WHERE created_by_run_id IN (SELECT id FROM agent_runs WHERE thread_id=$1)", root_id
+            )
+        assert target is not None and target["parent_thread_id"] is None
+        target_id = target["thread_id"]
+        assert target["tree_root_thread_id"] == target_id and target_id != root_id
+        root_project = await conn.fetchval("SELECT project_id FROM sessions WHERE thread_id=$1", root_id)
+        assert (target["project_id"] != root_project) == different_project
+        if different_project:
+            source_path = await conn.fetchval("SELECT workdir_path FROM projects WHERE id=$1", root_project)
+            target_path = await conn.fetchval("SELECT workdir_path FROM projects WHERE id=$1", target["project_id"])
+            assert (user_workspace_dir(uid) / target_path / "cooperation-target-only.txt").read_text() == "TARGET_PROJECT_VERIFIED"
+            assert not (user_workspace_dir(uid) / source_path / "cooperation-target-only.txt").exists()
+        inputs = await conn.fetch("SELECT id, origin_metadata FROM agent_inputs WHERE thread_id=$1 ORDER BY received_seq", target_id)
+        assert len(inputs) == 2
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM session_cooperation_events WHERE recipient_thread_id=$1 AND content='CROSS_TREE_MESSAGE'", target_id
+            )
+            == 1
+        )
+        origins = await e2e_client.get(
+            f"/api/agent/threads/{target_id}/input-origins", headers=e2e_headers, params=[("input_ids", item["id"]) for item in inputs]
+        )
+        assert origins.status_code == 200, origins.text
+        origin_items = origins.json()["origins"]
+        assert set(origin_items) == {item["id"] for item in inputs}
+        assert all(origin["target"]["session_id"] == root_id for origin in origin_items.values())
+        items = await e2e_client.get(f"/api/v1/agents/sessions/{target_id}/items", headers=e2e_headers)
+        assert items.status_code == 200, items.text
+        texts = [part["text"] for item in items.json()["data"] if item.get("role") == "user" for part in item["content"]]
+        assert texts == ["USER_SCOPE_CHILD FOLLOWUP", "USER_SCOPE_CHILD USER_SCOPE_WRITE" if different_project else "USER_SCOPE_CHILD"]
+        assert all("PRIVATE_ROOT_HISTORY" not in text for text in texts)
+    finally:
+        try:
+            # 先停止派发方，避免清理查询之后继续创建独立根。
+            if root_id:
+                source_turn = turn_id or await conn.fetchval(
+                    "SELECT id FROM agent_turns WHERE thread_id=$1 ORDER BY created_at DESC LIMIT 1", root_id
+                )
+                await archive_public_thread(e2e_client, e2e_headers, root_id, turn_id=source_turn)
+            resources = await conn.fetch(
+                "SELECT s.thread_id, s.project_id, s.uid, p.workdir_path, "
+                "(SELECT id FROM agent_turns WHERE thread_id=s.thread_id ORDER BY created_at DESC LIMIT 1) AS turn_id "
+                "FROM sessions s JOIN projects p ON p.id=s.project_id "
+                "WHERE s.thread_id=ANY($1::text[]) OR s.created_by_run_id IN (SELECT id FROM agent_runs WHERE thread_id=$2)",
+                [item for item in (root_id, target_id) if item],
+                root_id,
+            )
+            thread_ids = {row["thread_id"] for row in resources}
+            workdirs = {}
+            for row in resources:
+                if row["thread_id"] != root_id:
+                    await archive_public_thread(e2e_client, e2e_headers, row["thread_id"], turn_id=row["turn_id"])
+                if row["workdir_path"]:
+                    workdirs.setdefault((row["uid"], row["workdir_path"]), set()).add(row["project_id"])
+            await validate_test_runs_terminal(thread_ids)
+            await delete_test_session_resources(workdirs, thread_ids, {row["project_id"] for row in resources})
+            assert await conn.fetchval("SELECT count(*) FROM sessions WHERE thread_id=ANY($1::text[])", sorted(thread_ids)) == 0
+            for owner_uid, path in workdirs:
+                assert not (user_workspace_dir(owner_uid) / path).exists()
+        finally:
+            await conn.close()
+            await delete_agent(e2e_client, e2e_headers, slug)

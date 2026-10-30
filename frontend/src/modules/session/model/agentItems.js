@@ -93,6 +93,7 @@ export function itemsToMessages(items) {
     const runId = item.yuxi?.run_id
     const message = messages.get(key) || {
       id: item.id, type: item.role === 'user' ? 'human' : 'ai', content: '',
+      input_origin: item.yuxi?.input_origin,
       run_id: runId, turn_id: item.turn_id, input_id: item.yuxi?.input_id,
       delivery_status: item.yuxi?.delivery_status, created_at: item.yuxi?.created_at,
       execution_status: item.status, message_type: item.yuxi?.message_type,

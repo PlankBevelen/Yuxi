@@ -35,6 +35,7 @@ async def test_identity_prompt_uses_persisted_member_and_refreshes_for_new_run(m
         cooperation_path="/root",
         parent_thread_id=None,
         tree_root_thread_id="root-id",
+        project_id="project-id",
     )
     child = SimpleNamespace(
         thread_id="child-id",
@@ -42,6 +43,7 @@ async def test_identity_prompt_uses_persisted_member_and_refreshes_for_new_run(m
         cooperation_path="/root/researcher",
         parent_thread_id="root-id",
         tree_root_thread_id="root-id",
+        project_id="project-id",
     )
     from yuxi.modules.agents.repositories.input import AgentInputRepository
 
@@ -71,6 +73,8 @@ async def test_identity_prompt_uses_persisted_member_and_refreshes_for_new_run(m
     first = "\n".join(block["text"] for block in handler.call_args.args[0].system_message.content)
     assert '"role": "根会话"' in first and '"session_id": "root-id"' in first
     assert '"tree_execution_slots": 4' in first
+    assert '"project_id": "project-id"' in first
+    assert "只有同项目共享工作目录" in first
     assert "原始 Agent 指令" in first
     assert "@agent:<id>" in first
     assert "create_session 的 agent_id" in first
@@ -121,13 +125,24 @@ def test_create_session_schema_exposes_local_name_without_parent_or_path():
     """模型仅看到带局部名称约束的创建参数。"""
     tool = CooperationMiddleware().tools[0]
     schema = tool.tool_call_schema.model_json_schema()
-    assert set(schema["properties"]) == {"name", "description", "agent_id"}
+    assert set(schema["properties"]) == {"name", "description", "agent_id", "mode"}
     assert set(schema["required"]) == {"name", "description"}
     assert schema["properties"]["agent_id"]["default"] is None
+    assert schema["properties"]["mode"]["default"] == "child"
+    assert schema["properties"]["mode"]["enum"] == ["child", "root"]
     name = schema["properties"]["name"]
     assert name["pattern"] == "^[A-Za-z0-9_-]+$"
     assert name["minLength"] == 1 and name["maxLength"] == 64
-    assert "直属" in name["description"] and "路径" in name["description"]
+    assert "局部" in name["description"] and "路径" in name["description"]
+
+
+@pytest.mark.parametrize("mode", ["other", "", None])
+def test_create_session_tool_rejects_unknown_creation_mode(mode):
+    """工具边界只接受明确的直属或顶层模式。"""
+    tool = CooperationMiddleware().tools[0]
+    with pytest.raises(ValidationError) as rejected:
+        tool.tool_call_schema.model_validate({"name": "member", "description": "任务", "mode": mode})
+    assert any(error["loc"] == ("mode",) for error in rejected.value.errors())
 
 
 @pytest.mark.parametrize("name", ["/root/aaa/bbb", "aaa/bbb", "/root/name", "../bbb", r"aaa\bbb", "", "a" * 65])

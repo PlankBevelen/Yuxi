@@ -493,7 +493,7 @@ async def test_message_is_durable_idempotent_and_does_not_create_work(tree):
         assert await db.scalar(select(func.count()).select_from(AgentInput).where(AgentInput.thread_id == created["session_id"])) == 1
 
 
-async def test_cross_tree_and_cross_app_targets_are_rejected(tree):
+async def test_cross_tree_target_is_allowed_but_cross_app_is_rejected(tree):
     factory, run_id, root_id, uid = tree
     async with factory() as db:
         root = await db.scalar(select(Session).where(Session.thread_id == root_id))
@@ -513,14 +513,14 @@ async def test_cross_tree_and_cross_app_targets_are_rejected(tree):
         db.add_all([stranger, other_app])
         await db.commit()
         service = SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker")
-        for target in [stranger.thread_id, other_app.thread_id]:
-            with pytest.raises(ValueError, match="授权树"):
-                await service.send_message(target=target, content="forbidden", call_id=target)
+        await service.send_message(target=stranger.thread_id, content="cross-tree", call_id="cross-tree")
+        with pytest.raises(ValueError, match="授权范围"):
+            await service.send_message(target=other_app.thread_id, content="forbidden", call_id="other-app")
         assert (
             await db.scalar(
                 select(func.count())
                 .select_from(CooperationEvent)
-                .where(CooperationEvent.recipient_thread_id.in_([stranger.thread_id, other_app.thread_id]))
+                .where(CooperationEvent.recipient_thread_id == other_app.thread_id)
             )
             == 0
         )
@@ -1401,7 +1401,7 @@ async def test_input_wait_recovers_after_queued_input_cancelled(tree):
 
 
 async def test_task_lookup_and_wait_reject_unknown_scope_and_self(tree):
-    """模型不能通过任务 ID 绕过树边界或等待自身。"""
+    """模型不能通过任务 ID 绕过用户与 APP 边界或等待自身。"""
     factory, run_id, _, uid = tree
     member = await child(tree)
     async with factory() as db:
@@ -1409,7 +1409,7 @@ async def test_task_lookup_and_wait_reject_unknown_scope_and_self(tree):
         for arguments in ({}, {"input_id": member["input_id"], "turn_id": member["turn_id"]}):
             with pytest.raises(ValueError, match="只能"):
                 await service.get_result(**arguments)
-        with pytest.raises(ValueError, match="授权树"):
+        with pytest.raises(ValueError, match="授权范围"):
             await service.wait_inputs(input_ids=[member["input_id"], "missing"], timeout_seconds=30)
         _, acquired = await AgentRunRepository(db).mark_running(member["run_id"], worker_id="self", lease_seconds=120)
         assert acquired
@@ -1420,7 +1420,7 @@ async def test_task_lookup_and_wait_reject_unknown_scope_and_self(tree):
         target = await db.scalar(select(Session).where(Session.thread_id == member["session_id"]))
         target.app_id = "another-app"
         await db.flush()
-        with pytest.raises(ValueError, match="授权树"):
+        with pytest.raises(ValueError, match="授权范围"):
             await service.get_result(input_id=member["input_id"])
         await db.rollback()
 
@@ -1589,8 +1589,8 @@ async def test_bad_wait_does_not_block_other_wait_recovery(tree):
                     "waits": [
                         {
                             "interrupt_id": f"wait-{index}",
-                            "target_sessions": ["unused"],
-                            "after_cursor": 0,
+                            "target_sessions": [runs[1 - index].thread_id],
+                            "after_cursor": 9223372036854775807,
                             "deadline": "invalid" if index == 0 else "2000-01-01T00:00:00+00:00",
                         }
                     ],
@@ -2158,11 +2158,9 @@ async def test_input_accept_holds_source_owner_until_receipt_commit(tree, monkey
         assert run.worker_id == ("retry-worker" if transition == "retry" else "root-worker")
 
 
-async def test_message_waiting_for_tree_lock_holds_source_owner_until_event_commit(tree, monkeypatch):
-    """消息等待树锁时仍拥有来源锁，retry 不能越过消息事务提交。"""
+async def test_message_waiting_for_event_lock_holds_source_owner_until_event_commit(tree, monkeypatch):
+    """消息等待事件锁时仍拥有来源锁，retry 不能越过消息事务提交。"""
     from sqlalchemy import text
-
-    from yuxi.modules.agents.runtime_locks import cooperation_lock_key
 
     factory, run_id, root_id, uid = tree
     member = await child(tree)
@@ -2172,7 +2170,7 @@ async def test_message_waiting_for_tree_lock_holds_source_owner_until_event_comm
     original_append = CooperationRepository.append
 
     async def observe_append(repository, **kwargs):
-        """保留真实树锁获取，仅报告消息到达边界。"""
+        """保留真实事件锁获取，仅报告消息到达边界。"""
         if kwargs["key"].endswith(":message-before-retry"):
             sending_pid.set_result(await repository.db.scalar(text("SELECT pg_backend_pid()")))
             reached_append.set()
@@ -2210,7 +2208,7 @@ async def test_message_waiting_for_tree_lock_holds_source_owner_until_event_comm
     sending = retrying = None
     async with factory() as blocker:
         blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
-        await blocker.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": cooperation_lock_key(root_id)})
+        await blocker.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": f"cooperation-events:{uid}:"})
         try:
             sending = asyncio.create_task(send())
             await asyncio.wait_for(reached_append.wait(), 3)
@@ -2395,3 +2393,163 @@ async def _cancel_pending_tasks(*tasks):
         if task is not None and not task.done():
             task.cancel()
     await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
+
+
+async def test_root_creation_inherits_project_and_replays_without_duplicate_work(tree):
+    """独立根身份不继承历史，来源与树归属分别保存。"""
+    factory, run_id, root_id, uid = tree
+    async with factory() as db:
+        service = SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker")
+        args = dict(name="independent", description="NEW_ROOT_TASK", call_id="create-new-root", mode="root")
+        created = await service.create_session(**args)
+        assert await service.create_session(**args) == created
+        with pytest.raises(ValueError, match="模式"):
+            await service.create_session(**{**args, "mode": "child"})
+    async with factory() as db:
+        origin = await db.scalar(select(Session).where(Session.thread_id == root_id))
+        target = await db.scalar(select(Session).where(Session.thread_id == created["session_id"]))
+        assert target.parent_thread_id is None and target.tree_root_thread_id == target.thread_id
+        assert target.cooperation_path == "/root" and target.project_id == origin.project_id
+        assert target.created_by_run_id == run_id and target.config_snapshot == origin.config_snapshot
+        messages = list(await db.scalars(select(Message).where(Message.session_record_id == target.id)))
+        assert [message.content for message in messages] == ["NEW_ROOT_TASK"]
+        assert await db.scalar(select(func.count()).select_from(AgentInput).where(AgentInput.thread_id == target.thread_id)) == 1
+        service = SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker")
+        listing = await service.list_sessions()
+        assert {item["session_id"] for item in listing["sessions"]} == {root_id, target.thread_id}
+        assert (await service.require_target(origin, "/root")).thread_id == root_id
+        assert (await service.get_result(input_id=created["input_id"]))["session_id"] == target.thread_id
+        await service.send_message(target=target.thread_id, content="CROSS_TREE_NOTE", call_id="new-root-note")
+        await db.commit()
+        events = await CooperationRepository(db).mailbox(target)
+        assert any(event.content == "CROSS_TREE_NOTE" and event.sender_thread_id == root_id for event in events)
+        extra = await service.submit_input(target=target.thread_id, description="NEXT_WORK", call_id="new-root-next")
+        assert extra["input_id"] != created["input_id"] and extra["status"] == "queued"
+        await service.cancel_turn(target=target.thread_id, turn_id=created["turn_id"], call_id="cancel-new-root")
+    async with factory() as db:
+        assert (await db.get(AgentTurn, created["turn_id"])).status == "cancelled"
+
+
+async def test_cross_tree_input_wait_recovers_exact_result(tree):
+    """跨树任务结束后，原等待轮次创建恢复 Run 并绑定精确结果。"""
+    factory, run_id, root_id, uid = tree
+    async with factory() as db:
+        service = SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker")
+        target = await service.create_session(name="other", description="TASK", call_id="root-wait", mode="root")
+        wait = await service.wait_inputs(input_ids=[target["input_id"]], timeout_seconds=30)
+        run = await db.get(AgentRun, run_id)
+        turn = await db.get(AgentTurn, run.turn_id)
+        turn.status = "waiting"
+        turn.waitpoint = {"kind": "cooperation", "waits": [{**wait, "interrupt_id": "cross-tree-wait"}]}
+        run.status = "interrupted"
+        run.worker_id = None
+        run.lease_expires_at = None
+        await db.commit()
+    await complete_member(factory, target, "OTHER_TREE_RESULT")
+    await recover_cooperation_waits()
+    async with factory() as db:
+        turn = await db.get(AgentTurn, turn.id)
+        resumed = await db.get(AgentRun, turn.current_run_id)
+        assert resumed.id != run_id and resumed.thread_id == root_id
+        message = await db.get(Message, resumed.input_message_id)
+        result = message.extra_metadata["resume"]["cross-tree-wait"]["results"][0]
+        assert result["input_id"] == target["input_id"] and result["output"] == "OTHER_TREE_RESULT"
+
+
+async def test_nonhuman_origins_use_persisted_input_and_filter_source_scope(tree):
+    """来源只由 Input 决定；无权来源不泄露名称或链接。"""
+    from yuxi.modules.agents.services.message_origins import get_input_origins, get_session_navigation
+
+    factory, run_id, root_id, uid = tree
+    target = await child(tree)
+    async with factory() as db:
+        scope = ActorScope(uid=uid, app_id=None)
+        source = await get_input_origins(db=db, scope=scope, thread_id=target["session_id"], input_ids=[target["input_id"]])
+        origin = source["origins"][target["input_id"]]
+        assert origin["target"]["session_id"] == root_id and origin["target"]["run_id"] == run_id
+        assert origin["target"]["parent_session_id"] is None
+        navigation = await get_session_navigation(db=db, scope=scope, thread_id=target["session_id"])
+        assert navigation["tree_root_session_id"] == root_id and navigation["parent_session_id"] == root_id
+        input_item = await db.get(AgentInput, target["input_id"])
+        input_item.source = "public_api"
+        source = await get_input_origins(db=db, scope=scope, thread_id=target["session_id"], input_ids=[target["input_id"]])
+        assert source["origins"] == {}
+        input_item.source = "scheduled_agent"
+        source = await get_input_origins(db=db, scope=scope, thread_id=target["session_id"], input_ids=[target["input_id"]])
+        assert source["origins"][target["input_id"]] == {"kind": "schedule", "label": "定时任务", "target": None}
+        input_item.source = "cooperation"
+        parent = await db.scalar(select(Session).where(Session.thread_id == root_id))
+        parent.app_id = "hidden-app"
+        source = await get_input_origins(db=db, scope=scope, thread_id=target["session_id"], input_ids=[target["input_id"]])
+        assert source["origins"][target["input_id"]] == {"kind": "session", "label": "协作会话", "target": None}
+        await db.rollback()
+
+
+async def test_cross_tree_events_publish_in_commit_order(tree):
+    """不同树共用可观察游标，后分配事件必须等待先前事务提交。"""
+    from sqlalchemy import text
+    from yuxi.modules.agents.services.cooperation import read_updates
+
+    factory, run_id, root_id, uid = tree
+    async with factory() as db:
+        target = await SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker").create_session(
+            name="events", description="EVENT_TASK", call_id="root-events", mode="root"
+        )
+    async with factory() as first:
+        root = await first.scalar(select(Session).where(Session.thread_id == root_id))
+        other = await first.scalar(select(Session).where(Session.thread_id == target["session_id"]))
+        first_pid = await first.scalar(text("SELECT pg_backend_pid()"))
+        event = await CooperationRepository(first).append(sender=other, recipient=other, key="first-event", kind="turn_status")
+        second_pid = asyncio.get_running_loop().create_future()
+
+        async def publish_second():
+            """第二棵树提交自状态事件，实际锁等待由 PostgreSQL 观察。"""
+            async with factory() as db:
+                second_pid.set_result(await db.scalar(text("SELECT pg_backend_pid()")))
+                value = await CooperationRepository(db).append(sender=root, recipient=root, key="second-event", kind="turn_status")
+                await db.commit()
+                return value.id
+
+        task = asyncio.create_task(publish_second())
+        try:
+            await _wait_for_database_blocker(factory, await second_pid, first_pid)
+            async with factory() as observing:
+                before = await read_updates(observing, root, targets=[root_id, other.thread_id], after=0)
+                assert before["updates"] == []
+            await first.commit()
+            second_id = await asyncio.wait_for(task, 5)
+        finally:
+            await first.rollback()
+            await _cancel_pending_tasks(task)
+    async with factory() as db:
+        result = await read_updates(db, root, targets=[root_id, other.thread_id], after=0)
+        assert [item["event_id"] for item in result["updates"]] == [event.id, second_id]
+        assert result["cursor"] == second_id
+
+
+async def test_user_scope_cooperation_rejects_other_users_for_all_target_operations(tree):
+    """扩大协作范围不允许通过会话或任务身份越过用户边界。"""
+    factory, run_id, _, uid = tree
+    foreign_run, foreign_id, _ = await create_agent_run(factory, prefix="scope-outsider", message_content="PRIVATE", input_payload={})
+    try:
+        async with factory() as db:
+            service = SessionCooperationService(db, run_id=run_id, uid=uid, worker_id="root-worker")
+            outsider = await db.get(AgentRun, foreign_run)
+            for operation, kwargs in [
+                ("send_message", {"target": foreign_id, "content": "note", "call_id": "foreign-message"}),
+                ("submit_input", {"target": foreign_id, "description": "task", "call_id": "foreign-input"}),
+                ("cancel_turn", {"target": foreign_id, "turn_id": outsider.turn_id, "call_id": "foreign-cancel"}),
+                ("wait_updates", {"targets": [foreign_id], "after_cursor": 0, "timeout_seconds": 30}),
+                ("get_result", {"turn_id": outsider.turn_id}),
+            ]:
+                with pytest.raises(ValueError, match="授权范围"):
+                    await getattr(service, operation)(**kwargs)
+            assert foreign_id not in {item["session_id"] for item in (await service.list_sessions())["sessions"]}
+            assert (
+                await db.scalar(
+                    select(func.count()).select_from(CooperationEvent).where(CooperationEvent.recipient_thread_id == foreign_id)
+                )
+                == 0
+            )
+    finally:
+        await cleanup_agent_run_threads(factory, [foreign_id])

@@ -1,3 +1,4 @@
+import { createMemoryHistory, createRouter, routerKey } from 'vue-router'
 import assert from 'node:assert/strict'
 import { setImmediate } from 'node:timers'
 import test from 'node:test'
@@ -186,6 +187,7 @@ test('会话导出按稳定 Agent 身份读取列表元数据', async (t) => {
       return () => null
     } })
     app.use(pinia)
+    app.provide(routerKey, createRouter({ history: createMemoryHistory('/'), routes: [] }))
     app.provide(ssrContextKey, {})
     app.mount({ children: [] })
     await new Promise((resolve) => setImmediate(resolve))

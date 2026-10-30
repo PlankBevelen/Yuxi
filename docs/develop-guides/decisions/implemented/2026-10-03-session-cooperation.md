@@ -12,6 +12,8 @@ Owner：backend/yuxi/modules/agents/services/cooperation.py
 
 ## 决策
 
+顶层创建、跨树操作范围与消息来源导航由[会话来源与用户范围协作](./2026-10-29-session-provenance-and-user-cooperation.md)补充；树级执行名额和整树停止继续保持本记录的边界。
+
 精确任务结果、轻量观察、恢复隔离与多视图运行状态归属由[任务观察决策](./2026-10-07-cooperation-task-observation.md)补充。
 
 ### 概念与身份
@@ -23,11 +25,11 @@ Owner：backend/yuxi/modules/agents/services/cooperation.py
 | Agent | 可复用的模型、指令与能力配置 |
 | Session | 独立上下文及输入队列的会话实例；内部继续复用 Thread |
 | Input / Turn / Run | 持久接收的输入 / 一轮工作 / 一轮中的执行段，沿用现有归属与结果规则 |
-| 协作树 | Session 的创建关系；树内成员可互发消息、追加输入、取消指定 Turn |
+| 协作树 | Session 的创建关系；创建关系与树级执行容量；同用户同 APP 的会话可互发消息、追加输入、取消指定 Turn |
 
 移除 `is_subagent`、`SubAgentBackend`、子智能体专用目录和白名单配置入口。新会话默认使用派发方的 Agent 配置，继承其实际模型、能力配置与授权约束。Agent 目录与显式配置选择由[协作中的 Agent 发现与选择](./2026-10-09-cooperation-agent-directory.md)补充。角色与交付要求写入任务描述。新会话只接收显式描述，不复制父历史、checkpoint 或附件上下文，不提供 fork；共享目录中的文件仍可按权限读取。
 
-使用稳定 `session_id` 做持久身份、路由和授权校验；委派关系保存父 Session、局部唯一名称及创建来源 Run。创建时只接收局部 `name`，父节点绑定实际派发 Run 所属的 Session，路径由系统按父路径与名称生成；`/root` 创建 `aaa` 得到 `/root/aaa`，只有 `aaa` 自己创建 `bbb` 才得到 `/root/aaa/bbb`。工具参数 schema 和服务均拒绝把完整路径或多段路径作为名称，避免创建关系与调用者自定路径形成两份结构。名称路径如 `/root/reviewer` 在当前树内解析到 ID，不能单凭路径授权。名称创建后固定、显示标题可修改，第一版不支持改挂父节点。创建关系为树，通信与控制允许跨兄弟节点及层级，包括向根 Session 提交输入。
+使用稳定 `session_id` 做持久身份、路由和授权校验；委派关系保存父 Session、局部唯一名称及创建来源 Run。创建时只接收局部 `name`，默认子会话的父节点绑定实际派发 Run 所属的 Session，路径由系统按父路径与名称生成；`/root` 创建 `aaa` 得到 `/root/aaa`，只有 `aaa` 自己创建 `bbb` 才得到 `/root/aaa/bbb`。工具参数 schema 和服务均拒绝把完整路径或多段路径作为名称，避免创建关系与调用者自定路径形成两份结构。名称路径如 `/root/reviewer` 在当前树内解析到 ID，不能单凭路径授权。名称创建后固定、显示标题可修改，第一版不支持改挂父节点。创建关系为树，通信与控制允许跨兄弟节点及层级，包括向根 Session 提交输入。
 
 ### 协作接口
 
@@ -36,11 +38,11 @@ Owner：backend/yuxi/modules/agents/services/cooperation.py
 | 工具 | 行为与返回边界 |
 | --- | --- |
 | `create_session` | 创建关联会话并提交首个 Input，立即返回会话身份、名称路径与输入回执；有 Turn 时返回其 ID |
-| `send_message` | 向树内会话投递协作消息；运行中在安全边界读取，空闲时留待下次执行，不创建 Turn 或自动唤醒 |
-| `submit_input` | 向树内会话提交新工作；空闲时调度，忙碌时按 FIFO 排队，等待用户回答或审批时明确拒绝 |
+| `send_message` | 向同用户同 APP 会话投递协作消息；运行中在安全边界读取，空闲时留待下次执行，不创建 Turn 或自动唤醒 |
+| `submit_input` | 向同用户同 APP 会话提交新工作；空闲时调度，忙碌时按 FIFO 排队，等待用户回答或审批时明确拒绝 |
 | `cancel_turn` | 按 Session ID 与 Turn ID 取消指定工作；保留历史与既有副作用，不暂停、不承诺断点恢复 |
 | `wait_sessions` | 等待指定其他成员的消息或工作状态更新，任一有更新即返回；空列表和自身拒绝，携带消费位置与明确超时结果 |
-| `list_sessions` | 一次返回完整轻量协作树，区分会话存在、当前 Turn 状态和输入排队状态，不包含结果正文 |
+| `list_sessions` | 一次返回同用户同 APP 的全部轻量会话，区分会话存在、当前 Turn 状态和输入排队状态，不包含结果正文 |
 | `wait_inputs` | 按精确 Input 等待任务终态，支持排队输入与明确超时 |
 | `get_result` | 按 Input 或 Turn 读取其 result Run 对应的精确结果 |
 
@@ -81,7 +83,7 @@ PostgreSQL 拥有消息、回执、等待条件和终态事实；事务提交后
 - 统一 Session 并以委派关系协作：采用；复用执行底座，新增必要的消息与调度语义。
 - 直接托管到 Responses API：不采用为本方案前提；Yuxi 继续拥有多模型接入、持久状态与共享沙盒。
 
-非目标：上下文继承或 fork、用户暂停/断点恢复、跨树协作、改挂父节点、新 Task 状态机、自动写冲突解决，以及全局 Thread 重命名。
+非目标：上下文继承或 fork、用户暂停/断点恢复、跨用户或跨 APP 协作、改挂父节点、新 Task 状态机、自动写冲突解决，以及全局 Thread 重命名。
 
 ## 验证
 
@@ -92,7 +94,7 @@ PostgreSQL 拥有消息、回执、等待条件和终态事实；事务提交后
 | 统一会话、独立上下文、递归创建 | 仍走特殊后端、复制父历史或任意指定路径 | runtime、cooperation 服务 | 工具名称 schema 用例；`test_session_cooperation.py` 回读真实父节点、名称路径、创建 Run 和拒绝后的持久记录；`test_session_cooperation_e2e.py` 回读模型请求、Session、Input 和 Run | 旧工具 schema 的路径参数用例失败；测试进程移除服务名称校验后，六种路径输入均以未拒绝失败；子模型请求包含父历史即拒绝；孙代仍计入根容量 | Passed |
 | 整树最多四槽，协作等待释放执行 Owner | 超额或等待阻塞子执行 | cooperation repository、runner | 真实 PG 并发领取；E2E 父等待时四名子成员真实执行，第五名排队，同 Turn 建立 resume Run | 第五个领取拒绝；重复恢复不新增 Run | Passed |
 | 幂等与消息不创建工作，目标结果不串轮 | 重复创建、无输入唤醒、输出归属错误 | inputs、cooperation、Turn.result_run_id | PG 回读事件和输入数量；HTTP state 恢复；确定性父子 E2E | 跨 resume Run 重放不重复副作用；改变名称/输入/消息或目标拒绝，新 Turn 可复用 call ID；输出不混入父消息；恢复旧的按接收方查询会使三种跨目标重放断言失败 | Passed |
-| 树内授权、FIFO 与精确取消 | 跨树/APP、绕过审批、父取消杀子 | scoped repositories、cooperation / turns | PG 与相关真实 HTTP；取消父 Turn 后回读独立子 Turn；兄弟消息/输入/取消；整树停止与继续 | 跨树/APP 无事件写入；审批等待返回 409；旧停止扫描不能重新暂停已继续的队列；停止意图先落库时模型边界按取消收敛；已释放 Owner 的重试停止后不能以过期 lease 失败收尾或被继续队列复活 | Passed |
+| 用户与 APP 授权、FIFO 与精确取消 | 跨用户/APP、绕过审批、父取消杀子 | scoped repositories、cooperation / turns | PG 与相关真实 HTTP；取消父 Turn 后回读独立子 Turn；兄弟消息/输入/取消；整树停止与继续 | 跨用户/APP 无事件写入（跨树范围见用户范围协作记录）；审批等待返回 409；旧停止扫描不能重新暂停已继续的队列；停止意图先落库时模型边界按取消收敛；已释放 Owner 的重试停止后不能以过期 lease 失败收尾或被继续队列复活 | Passed |
 | 共享实际沙盒与安全空闲释放 | 独立环境、错误回收、丢失持久文件 | sandbox、leases、workspace | 父子 E2E：子读取父 `/tmp` 标记；释放后目录文件保留、临时文件消失；PG 活跃树回收负向 | 活跃 Run 存在时不得调用释放器 | Passed |
 | 页面观察自动恢复与普通成员入口 | waiting 误断 SSE、恢复后不能 steer、分页缺席清空成员、审批失败不能重试 | SessionWorkspace、useAgentRunStream、chatThreads、CooperationTree | SSE 协议与分页回归；真实浏览器接收追加输入后的父自动恢复输出；验证状态汇总、独立协作列表、标签复用/关闭、独立草稿/滚动、最大化/还原和浅深色窄屏；拦截 503 验证审批与问答重试 | waiting 后追加输入 abort 订阅即失败；首页移除成员后仍须定向加载原会话；审批失败保留已选决定与答案，解除处理中状态 | Passed |
 | 状态面板嵌入与悬浮 | 面板压住消息/入口/输入框、悬浮无法关闭、后台面板被误关闭 | statePanelLayout、SessionWorkspace、useOutsidePointerdown | 6 项布局 unit；真实浏览器验证 2200/1280/375px、分栏/最大化、内部/外部点击、入口开合与路由保活 | 测试进程恢复始终悬浮后，两项嵌入用例以模式错误失败 | Passed |

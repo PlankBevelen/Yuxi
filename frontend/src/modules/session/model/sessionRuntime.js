@@ -250,7 +250,6 @@ export const useSessionRuntimeStore = defineStore('sessionRuntime', () => {
 
   /** 摘要只触发已打开成员回读详情，不覆盖共享运行事实。 */
   const reconcileCooperationSessions = async (sessions) => {
-    if (sessions.length < 2) return
     await Promise.all(sessions.map(async (session) => {
       const threadId = session.session_id
       if (!observers.has(threadId)) return
