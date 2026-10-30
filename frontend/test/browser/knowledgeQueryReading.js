@@ -105,7 +105,7 @@ async page => {
           await compact.click()
           const hoveredItem = page.getByRole('menuitem', { name: 'Chunks', exact: true })
           await hoveredItem.hover()
-          await hoveredItem.evaluate(async el => { await Promise.all(el.getAnimations().map(animation => animation.finished)) })
+          await hoveredItem.evaluate(async el => { await Promise.all(el.getAnimations().map(animation => animation.finished.catch(() => {}))) })
           const colors = await page.locator('.ant-dropdown.knowledge-file-actions:visible').evaluate(el => {
             const swatch = document.createElement('span')
             document.body.append(swatch)

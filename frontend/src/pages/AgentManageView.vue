@@ -140,21 +140,21 @@ onBeforeRouteUpdate((to) => canChangeTab(normalizeTab(to.query.tab)))
 
 .summary-strip {
   display: flex;
-  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
 
   span {
-    padding: 6px 10px;
-    border: 1px solid var(--gray-100);
-    border-radius: 7px;
-    background: var(--gray-10);
     color: var(--gray-700);
     font-size: 12px;
     line-height: 18px;
+    white-space: nowrap;
   }
 
   .warning-count {
+    padding: 2px 8px;
+    border-radius: 4px;
     background: var(--color-warning-50);
-    border-color: var(--color-warning-100);
     color: var(--color-warning-700);
   }
 }

@@ -380,8 +380,6 @@ watch(
 
   @media (max-width: 900px) {
     flex-direction: column;
-    height: auto;
-    min-height: 75vh;
   }
 }
 
@@ -538,22 +536,23 @@ watch(
 
 /* Content Area */
 :root.dark .settings-modal .settings-sider {
-  background: var(--gray-25);
-  border-right-color: transparent;
+  background: var(--gray-0);
+  border-right-color: var(--gray-150);
 }
 
 :root.dark .settings-modal .ant-modal-content {
-  border-color: transparent;
+  border-color: var(--gray-200);
   box-shadow: none;
 }
 
 :root.dark .settings-modal .settings-content-wrapper {
-  background: transparent;
+  background: var(--gray-10);
 }
 
 .settings-content-wrapper {
   flex: 1;
   height: 100%;
+  min-height: 0;
   max-width: calc(100% - 176px);
   min-width: 0;
   display: flex;
@@ -563,6 +562,7 @@ watch(
 
   @media (max-width: 900px) {
     max-width: 100%;
+    height: auto;
     padding: 8px;
   }
 

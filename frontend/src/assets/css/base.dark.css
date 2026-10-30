@@ -72,8 +72,8 @@
 
   /* 页面底色独立于表面色，避免页面、卡片、输入框同色。 */
   --bg-page: #141619;
-  --border-surface: transparent;
-  --border-surface-hover: transparent;
+  --border-surface: var(--gray-150);
+  --border-surface-hover: var(--gray-200);
 
   /* 语义色阶：主色与次要色继承基础别名，状态色在此适配深色模式。 */
   --color-success-10: #0f1810; /* 微弱背景 */

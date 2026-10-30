@@ -60,9 +60,11 @@ function emitChange(item) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  height: 48px;
-  padding: 0 var(--page-padding);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 8px 16px;
+  min-height: 48px;
+  padding: 8px var(--page-padding);
   background-color: var(--gray-0);
   position: sticky;
   top: 0;
@@ -78,6 +80,8 @@ function emitChange(item) {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .page-header-title {
@@ -95,9 +99,10 @@ function emitChange(item) {
   padding-left: 12px;
   margin-left: 2px;
   border-left: 1px solid var(--gray-200);
-  height: 18px;
+  min-height: 18px;
   line-height: 18px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .tab-item {
@@ -133,7 +138,9 @@ function emitChange(item) {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-left: auto;
 }
 
 .page-header-loading-bar-wrapper {

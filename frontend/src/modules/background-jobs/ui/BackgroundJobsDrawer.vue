@@ -456,7 +456,7 @@ function canCancel(job) {
 
 .job-card {
   background: var(--gray-0);
-  border: 1px solid var(--gray-200);
+  border: 1px solid var(--border-surface);
   border-radius: 10px;
   padding: 12px 16px;
   transition: all 0.2s ease;
@@ -468,8 +468,8 @@ function canCancel(job) {
 }
 
 .job-card:hover {
-  border-color: var(--gray-300);
-  box-shadow: 0 2px 8px var(--shadow-1);
+  border-color: var(--border-surface-hover);
+  background: var(--gray-25);
 }
 
 /* 状态指示器 */

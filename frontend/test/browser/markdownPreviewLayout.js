@@ -20,7 +20,7 @@ async (page) => {
       const { useThemeStore } = await import('/src/shared/model/theme.js')
       const antUrl = module.match(/from "([^"]*ant-design-vue\.js[^"]*)"/)[1]
       const { default: AntDesign } = await import(antUrl)
-      const content = '# Markdown 文档\n\n正文包含 `inline`、[链接](https://example.com) 和长文本。\n\n```python\nprint(42)\n```\n\n```html:preview\n<html><body><p>内嵌预览</p></body></html>\n```'
+      const content = '| 项目 | 状态 |\n| --- | --- |\n| 示例 | 完成 |\n\n# Markdown 文档\n\n正文包含 `inline`、[链接](https://example.com) 和长文本。\n\n```python\nprint(42)\n```\n\n```html:preview\n<html><body><p>内嵌预览</p></body></html>\n```'
       const references = ['one', 'two'].map(id => ({
         answer_start_line: 3, answer_end_line: 3, quote: '正文引用',
         source: { id, kind: 'web', title: `来源 ${id}`, url: `https://${id}.example.com` }
@@ -44,6 +44,17 @@ async (page) => {
     })
     const preview = page.locator('#markdown-layout-probe .agent-file-preview .yk-markdown-preview')
     await preview.locator('h1').waitFor()
+    /** Markdown 表格继承文档底色，不能套用管理表格表面。 */
+    const checkTransparentTable = async () => {
+      const colors = await preview.locator('table, th, td, tr').evaluateAll(elements => elements.map(element => getComputedStyle(element).backgroundColor))
+      check(colors.length > 3 && colors.every(color => color === 'rgba(0, 0, 0, 0)'), 'Markdown 表格不应带独立背景')
+    }
+    await checkTransparentTable()
+    const opaqueRows = await page.addStyleTag({ content: '.yk-markdown-preview tr {background:#222!important}' })
+    let opaqueRowsRejected = false
+    try { await checkTransparentTable() } catch (error) { opaqueRowsRejected = error.message.includes('Markdown 表格不应带独立背景') }
+    finally { await opaqueRows.evaluate(element => element.remove()) }
+    check(opaqueRowsRejected, '未拒绝 Markdown 表格不透明背景')
     const measurements = []
     for (const dark of [false, true]) {
       await page.evaluate(value => window.markdownLayoutProbe.theme.setTheme(value), dark)
@@ -65,6 +76,7 @@ async (page) => {
         check(compact.padding === '0px' && compact.size === '14px' && compact.classForwarded, '紧凑预览或调用方属性发生回归')
         const document = await page.locator('#markdown-layout-probe .document-text-preview').evaluate(el => ({ padding: getComputedStyle(el).padding, childPadding: getComputedStyle(el.querySelector('.yk-markdown-preview')).padding }))
         check(document.padding === '16px' && document.childPadding === '0px', '文档容器重复留白')
+        await checkTransparentTable()
         measurements.push({ dark, width, ...measured })
       }
       await page.screenshot({ path: `/tmp/yuxi-markdown-padding-${dark ? 'dark' : 'light'}-mobile.png` })
@@ -107,7 +119,7 @@ async (page) => {
     await page.locator('#compact-markdown .markdown-code-copy-btn').first().click()
     check(await page.evaluate(() => navigator.clipboard.readText()) === 'print(42)\n', '代码复制内容错误')
     check(errors.length === 0, `浏览器运行异常：${errors.join('; ')}`)
-    return { measurements, fullscreen: true, chunks: true, referenceUpdates: true, codeCopy: true, legacyHtmlAsCode: true }
+    return { opaqueRowsRejected, measurements, fullscreen: true, chunks: true, referenceUpdates: true, codeCopy: true, legacyHtmlAsCode: true }
   } finally {
     await page.evaluate(theme => {
       const probe = window.markdownLayoutProbe

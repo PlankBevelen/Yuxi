@@ -124,9 +124,9 @@ async page => {
     if (dark) {
       check(normal.border === '0px' && normal.shadow === 'none', '暗色输入框仍有描边或阴影')
       check(normal.send.background === 'rgb(245, 247, 247)' && normal.send.color === 'rgb(20, 22, 25)' && normal.send.shadow === 'none', '暗色发送按钮应为无阴影的白底深色图标')
-      check(normal.cards.every(card => card.border === 'rgba(0, 0, 0, 0)' && card.shadow === 'none'), '暗色普通卡片仍依赖装饰边框或阴影')
+      check(normal.cards.every(card => card.border === 'rgb(61, 66, 71)' && card.shadow === 'none'), '暗色普通卡片应保留深灰细边框且无装饰阴影')
       check(nested.background !== nested.parent, '嵌套指标卡与父卡片缺少背景阶梯')
-      check(nested.parentBorder === 'rgba(0, 0, 0, 0)', '暗色图表卡片仍有装饰边框')
+      check(nested.parentBorder === 'rgb(61, 66, 71)', '暗色图表卡片缺少深灰边界')
     } else {
       check(normal.background === 'rgb(255, 255, 255)' && normal.border === '1px', '浅色输入框发生回归')
       check(normal.send.background === 'rgb(57, 150, 174)', '浅色发送按钮配色发生回归')

@@ -54,7 +54,7 @@
 
 /* 共享的卡片样式 */
 :root.dark .dashboard-card {
-  border-color: transparent;
+  border-color: var(--border-surface);
 }
 
 .dashboard-card {

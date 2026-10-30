@@ -660,10 +660,9 @@ defineExpose({ loadOverview })
 
 .evaluation-list-shell {
   overflow: hidden;
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--border-surface);
   border-radius: 10px;
-  background: var(--gray-0);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 3%);
+  background: var(--gray-10);
 }
 
 .evaluation-divider-list {

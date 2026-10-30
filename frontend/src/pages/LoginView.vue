@@ -743,7 +743,7 @@ onUnmounted(() => {
   height: 560px;
   background: var(--gray-0);
   border-radius: 16px;
-  box-shadow: 0 0px 40px var(--shadow-1);
+  border: 1px solid var(--border-surface);
   display: flex;
   overflow: hidden;
 }

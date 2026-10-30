@@ -40,7 +40,8 @@ export const useThemeStore = defineStore('theme', () => {
         colorBgElevated: css('--color-bg-elevated'),
         colorBgLayout: css(isDark.value ? '--bg-page' : '--gray-50'),
         colorBorder: css('--gray-200'),
-        colorBorderSecondary: css(isDark.value ? '--border-surface' : '--gray-150'),
+        colorBorderSecondary: css('--gray-150'),
+        colorSplit: css('--gray-150'),
         colorFillAlter: css('--gray-25'),
         controlOutline: css('--main-100'),
         borderRadius: 8,
@@ -53,6 +54,8 @@ export const useThemeStore = defineStore('theme', () => {
       },
       components: {
         Button: {
+          controlOutlineWidth: 0,
+          colorPrimary: css('--main-color'),
           borderRadius: parseFloat(css('--radius-control')),
           colorTextLightSolid: css('--color-on-primary'),
           colorPrimaryHover: css(isDark.value ? '--main-600' : '--main-800'),
@@ -67,6 +70,9 @@ export const useThemeStore = defineStore('theme', () => {
           colorTextLightSolid: css('--gray-0')
         },
         Tag: { borderRadiusSM: 4 },
+        Table: {
+          colorBgContainer: css('--gray-0')
+        },
         Form: { colorTextHeading: css('--gray-800') },
         Select: {
           controlItemBgActive: css('--gray-100'),
@@ -79,9 +85,10 @@ export const useThemeStore = defineStore('theme', () => {
           controlItemBgActiveHover: css('--gray-150')
         },
         Switch: {
+          colorPrimary: css('--main-color'),
           colorTextLightSolid: css('--color-on-primary'),
-          colorTextQuaternary: css('--gray-600'),
-          colorTextTertiary: css('--gray-700')
+          colorTextQuaternary: css(isDark.value ? '--gray-200' : '--gray-600'),
+          colorTextTertiary: css(isDark.value ? '--gray-300' : '--gray-700')
         },
         Message: { borderRadiusLG: 8 },
         Notification: { borderRadiusLG: 8 },

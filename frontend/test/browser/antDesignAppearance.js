@@ -49,6 +49,17 @@ async (page) => {
     }
   }
 
+  /** 普通按钮不能借装饰阴影表达层级。 */
+  const checkButtonShadow = async () => {
+    const shadow = await page.locator('#probe-button-1').evaluate(el => getComputedStyle(el).boxShadow)
+    check(shadow === 'none' || shadow.endsWith('0px 0px 0px 0px'), '普通按钮仍有装饰阴影')
+  }
+  /** 无阴影暗色菜单依靠细描边与邻接表面区分。 */
+  const checkDropdownEdge = async () => {
+    const edge = await page.locator('.appearance-select-1').evaluate(el => { const s = getComputedStyle(el); return { width: s.outlineWidth, style: s.outlineStyle, color: s.outlineColor, background: s.backgroundColor } })
+    check(edge.width === '1px' && edge.style === 'solid' && contrast(edge.color, edge.background) >= 1.5, '暗色菜单与相邻表面缺少可见边界')
+  }
+
   try {
     // Pinia Store 的方法闭包不会随所有 HMR 修改重建，刷新后验证当前实现。
     await page.reload()
@@ -222,6 +233,25 @@ async (page) => {
         window.antAppearanceProbe.theme.setTheme(value)
         await window.antAppearanceProbe.nextTick()
       }, dark)
+      await checkButtonShadow()
+      await page.locator('.appearance-select-control-1 .ant-select-selector').click()
+      const dropdown = page.locator('.appearance-select-1')
+      await dropdown.waitFor()
+      if (dark) {
+        await checkDropdownEdge()
+        const oldAppearance = await page.addStyleTag({ content: '#probe-button-1 { box-shadow:0 2px 0 #035065!important;transition:none!important }.appearance-select-1 { outline:none!important }' })
+        let shadowRejected = false, edgeRejected = false
+        try {
+          try { await checkButtonShadow() } catch (error) { shadowRejected = error.message.includes('普通按钮仍有装饰阴影') }
+          try { await checkDropdownEdge() } catch (error) { edgeRejected = error.message.includes('暗色菜单与相邻表面缺少可见边界') }
+        } finally { await oldAppearance.evaluate(el => el.remove()) }
+        check(shadowRejected && edgeRejected, '外观检查没有拒绝旧阴影或消失的菜单边界')
+        await page.waitForFunction(() => document.querySelector('#probe-button-1').getAnimations().every(animation => animation.playState !== 'running'))
+        await checkButtonShadow()
+        await checkDropdownEdge()
+        results.oldAppearanceRejected = true
+      }
+      await page.keyboard.press('Escape')
       results.componentPrimaryContrast[dark ? 'dark' : 'light'] = await primaryContrast('#probe-button-1')
       results.dangerPrimaryContrast[dark ? 'dark' : 'light'] = await primaryContrast('#probe-button-danger')
       const switches = {}

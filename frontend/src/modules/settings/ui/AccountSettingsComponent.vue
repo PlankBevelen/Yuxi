@@ -155,9 +155,11 @@
     </div>
 
     <div class="settings-surface-card activity-card">
-      <div class="activity-header">
-        <div class="settings-section-title">消息活动</div>
-        <p class="settings-section-description">近一年的消息数，包含用户消息、模型消息与工具消息。</p>
+      <div class="settings-header">
+        <div class="settings-header-copy">
+          <div class="settings-section-title">消息活动</div>
+          <p class="settings-section-description">近一年的消息数，包含用户消息、模型消息与工具消息。</p>
+        </div>
       </div>
       <DashboardActivityHeatmap
         :data="activityData"
@@ -394,6 +396,11 @@ onMounted(loadMessageActivity)
 </script>
 
 <style lang="less" scoped>
+:global(:root.dark .account-settings .profile-card),
+:global(:root.dark .account-settings .activity-card) {
+  background: var(--gray-0);
+}
+
 .account-settings {
   .profile-card {
     display: flex;
@@ -405,18 +412,6 @@ onMounted(loadMessageActivity)
   .activity-card {
     margin-top: 16px;
     background: var(--gray-25);
-  }
-
-  .activity-header {
-    margin-bottom: 12px;
-
-    .settings-section-title {
-      margin-bottom: 4px;
-    }
-
-    .settings-section-description {
-      margin-bottom: 0;
-    }
   }
 
   .profile-summary {

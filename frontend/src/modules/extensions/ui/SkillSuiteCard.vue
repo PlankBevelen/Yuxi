@@ -64,7 +64,7 @@ const statusText = computed(() => {
   width: 100%;
   min-height: 170px;
   padding: 18px;
-  border: 1px solid var(--gray-150);
+  border: 1px solid transparent;
   border-radius: 8px;
   background: var(--gray-0);
   color: var(--gray-900);
@@ -75,7 +75,6 @@ const statusText = computed(() => {
     background-color 0.18s ease;
 
   &:hover {
-    border-color: var(--gray-300);
     background: var(--gray-10);
   }
 

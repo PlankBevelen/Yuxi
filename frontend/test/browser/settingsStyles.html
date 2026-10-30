@@ -12,6 +12,7 @@
       import { createPinia } from 'pinia'
       import { createMemoryHistory, createRouter } from 'vue-router'
       import Antd, { ConfigProvider } from 'ant-design-vue'
+      import UserInfo from '../../src/modules/settings/ui/UserInfoComponent.vue'
       import SettingsModal from '../../src/modules/settings/ui/SettingsModal.vue'
       import AccountSettings from '../../src/modules/settings/ui/AccountSettingsComponent.vue'
       import ApiKeyManagement from '../../src/modules/settings/ui/ApiKeyManagementComponent.vue'
@@ -25,6 +26,7 @@
       const state = reactive({ mode: 'modal', panel: 'account', revision: 0 })
       const standalonePanels = {
         account: AccountSettings,
+        menu: UserInfo,
         apiKeys: ApiKeyManagement,
         user: UserManagement,
         department: DepartmentManagement,

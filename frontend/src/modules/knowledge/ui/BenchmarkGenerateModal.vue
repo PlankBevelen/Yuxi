@@ -3,6 +3,8 @@
     v-model:open="visible"
     title="自动生成评估基准"
     width="600px"
+    centered
+    :body-style="{ maxHeight: 'min(68dvh, 600px)', overflowY: 'auto' }"
     :mask-closable="!generating"
     :closable="!generating"
     @cancel="handleCancel"

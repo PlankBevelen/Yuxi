@@ -754,7 +754,7 @@ watch(
   flex: 0 1 auto;
   overflow-y: auto;
   padding: 16px;
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--border-surface);
   border-radius: 8px;
   background: var(--gray-25);
 
@@ -803,7 +803,7 @@ watch(
 
 .selection-item,
 :deep(.status-item) {
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--border-surface);
   border-radius: 8px;
   background: var(--gray-0);
 }
@@ -811,7 +811,7 @@ watch(
 .selection-list {
   overflow: hidden;
   gap: 0;
-  border: 1px solid var(--gray-150);
+  border: 1px solid var(--border-surface);
   border-radius: 8px;
   background: var(--gray-0);
 

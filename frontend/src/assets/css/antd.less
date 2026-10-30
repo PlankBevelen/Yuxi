@@ -54,3 +54,16 @@ a.ant-btn {
     margin-inline-start: 0;
   }
 }
+
+/* 暗色浮层不依赖阴影，细描边区分菜单与相邻表面。 */
+:root.dark {
+  .ant-switch:not(.ant-switch-checked) .ant-switch-inner-unchecked {
+    color: var(--gray-900);
+  }
+
+  .ant-select-dropdown,
+  .ant-dropdown-menu,
+  .ant-popover-inner {
+    outline: 1px solid var(--gray-200);
+  }
+}

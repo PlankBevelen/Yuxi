@@ -110,9 +110,9 @@ onMounted(loadSession)
 .cli-auth-panel {
   width: min(520px, 100%);
   padding: 32px;
-  border: 1px solid var(--dark-10);
+  border: 1px solid var(--border-surface);
   border-radius: 8px;
-  background: var(--color-bg-container);
+  background: var(--gray-0);
 }
 
 .cli-auth-header {
@@ -140,7 +140,7 @@ onMounted(loadSession)
 
 .code-block {
   padding: 16px;
-  border: 1px solid var(--dark-10);
+  border: 1px solid var(--border-surface);
   border-radius: 8px;
   background: var(--color-bg-elevated);
   color: var(--color-text);

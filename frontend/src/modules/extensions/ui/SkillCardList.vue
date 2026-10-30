@@ -1334,6 +1334,11 @@ defineExpose({
 .card-wrapper {
   position: relative;
 
+  :deep(.info-card) {
+    --border-surface: transparent;
+    --border-surface-hover: transparent;
+  }
+
   :deep(.info-card-mini-desc) {
     display: -webkit-box;
     min-height: 36px;
