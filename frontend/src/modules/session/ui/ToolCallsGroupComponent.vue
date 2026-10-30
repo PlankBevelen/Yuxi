@@ -188,6 +188,8 @@ const toggleToolCallsExpanded = () => {
 <style lang="less" scoped>
 .tool-calls-container {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin-block: 8px;
   padding: 0;
   display: flex;
@@ -229,6 +231,7 @@ const toggleToolCallsExpanded = () => {
     .summary-content {
       min-width: 0;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 6px;
       flex: 1;
@@ -291,6 +294,7 @@ const toggleToolCallsExpanded = () => {
   }
 
   .tool-calls-collapse-inner {
+    min-width: 0;
     overflow: hidden;
     min-height: 0;
     opacity: 0;
@@ -313,6 +317,7 @@ const toggleToolCallsExpanded = () => {
   }
 
   .tool-call-container {
+    min-width: 0;
     margin-bottom: 4px;
     &:last-child {
       margin-bottom: 0;

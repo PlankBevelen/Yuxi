@@ -160,8 +160,7 @@ defineExpose({ loading, stats: totals })
   display: flex;
   flex-direction: column;
   gap: 16px;
-  height: 100%;
-  min-height: 0;
+  min-height: 100%;
   padding: 12px var(--page-padding) 24px;
 }
 

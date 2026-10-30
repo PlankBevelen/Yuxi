@@ -252,6 +252,8 @@ const hasResult = computed(() => {
 
 <style lang="less" scoped>
 .tool-call-display {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--gray-100);
   border-radius: 8px;
   overflow: hidden;
@@ -317,6 +319,7 @@ const hasResult = computed(() => {
     }
 
     .tool-expand-icon {
+      flex-shrink: 0;
       margin-left: auto;
       color: var(--gray-300);
       display: flex;
@@ -324,6 +327,7 @@ const hasResult = computed(() => {
     }
 
     .tool-header-content {
+      min-width: 0;
       display: flex;
       align-items: center;
       flex: 1;

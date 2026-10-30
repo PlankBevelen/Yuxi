@@ -993,10 +993,6 @@ const showCopiedFeedback = (btn) => {
     font-weight: 600;
   }
 
-  tr {
-    background-color: var(--gray-0);
-  }
-
   img {
     max-width: 100%;
     height: auto;

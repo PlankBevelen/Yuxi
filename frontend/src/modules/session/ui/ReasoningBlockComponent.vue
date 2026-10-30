@@ -1,5 +1,6 @@
 <template>
   <BaseToolCall
+    class="reasoning-block"
     appearance="timeline"
     :status="isActive ? 'running' : 'completed'"
     hide-params
@@ -35,6 +36,13 @@ const preview = computed(() => props.content.trim().split(/\r\n|\r|\n/).at(-1).t
 </script>
 
 <style lang="less" scoped>
+.reasoning-block:not(.is-collapsed) {
+  .separator,
+  .description {
+    display: none;
+  }
+}
+
 .reasoning-icon {
   flex-shrink: 0;
   color: var(--gray-600);
