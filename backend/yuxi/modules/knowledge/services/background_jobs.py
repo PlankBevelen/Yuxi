@@ -80,12 +80,6 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
                 f"[3/3] 入库文件 {index}/{len(parsed_files)}",
             )
             try:
-                await knowledge_base.update_file_params(
-                    kb_id,
-                    record["file_id"],
-                    indexing_params,
-                    operator_id=operator_id,
-                )
                 processed_items[record["index"]] = await knowledge_base.index_file(
                     kb_id,
                     record["file_id"],
@@ -294,16 +288,14 @@ async def _process_document_file(
     params: dict,
     operator_id: str,
 ) -> dict:
-    """先更新参数，再以当前 attempt 身份执行单文件动作；异常转为失败结果并记录日志。"""
+    """以当前 attempt 身份领取文件和参数，再执行动作并汇总失败。"""
     processing_owner = {
         "processing_job_id": context.job_id,
         "processing_owner": context.worker_id,
     }
     try:
-        if params:
-            await knowledge_base.update_file_params(kb_id, file_id, params, operator_id=operator_id)
         if action == "parse":
-            return await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id, **processing_owner)
+            return await knowledge_base.parse_file(kb_id, file_id, operator_id=operator_id, params=params, **processing_owner)
         return await knowledge_base.index_file(kb_id, file_id, operator_id=operator_id, params=params, **processing_owner)
     except Exception as exc:
         _log_document_failure(context, kb_id=kb_id, action=action, exc=exc, file_id=file_id)

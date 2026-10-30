@@ -530,6 +530,7 @@ class KnowledgeBaseManager:
         file_id: str,
         operator_id: str | None = None,
         *,
+        params: dict | None = None,
         processing_job_id: str | None = None,
         processing_owner: str | None = None,
     ) -> dict:
@@ -543,6 +544,7 @@ class KnowledgeBaseManager:
                 file_id,
                 operator_id,
                 additional_params=config.additional_params,
+                params=params,
                 processing_job_id=processing_job_id,
                 processing_owner=processing_owner,
             ),
@@ -573,18 +575,6 @@ class KnowledgeBaseManager:
                 processing_job_id=processing_job_id,
                 processing_owner=processing_owner,
             ),
-        )
-
-    async def update_file_params(self, kb_id: str, file_id: str, params: dict, operator_id: str | None = None) -> None:
-        """更新文件处理参数。"""
-        config = await self.get_kb_config(kb_id)
-        executor = await self._get_or_create_kb_instance(config.kb_type)
-        await executor.update_file_params(
-            kb_id,
-            file_id,
-            params,
-            operator_id,
-            additional_params=config.additional_params,
         )
 
     async def create_folder(

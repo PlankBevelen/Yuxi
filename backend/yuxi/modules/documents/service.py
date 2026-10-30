@@ -13,12 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.infrastructure.document_parsing import OCR_FILE_EXTENSIONS, ParseOptions, ParseResult
 from yuxi.infrastructure.document_parsing.engines import ENGINE_SPECS, get_engine, get_engine_spec
 from yuxi.infrastructure.observability.logging import logger
-from yuxi.modules.documents.options import (
-    mineru_ocr_host_opts,
-    mineru_official_api_opts,
-    paddleocr_api_opts,
-    pp_structure_v3_ocr_host_opts,
-)
+from yuxi.modules.documents.options import DOCUMENT_OPTIONS, OCR_ENGINE_OPTIONS
 from yuxi.modules.models.providers.service import resolve_deepseek_ocr_credentials
 from yuxi.modules.system.options import system_options
 
@@ -27,6 +22,7 @@ async def get_ocr_options(db: AsyncSession | None = None) -> dict[str, Any]:
     options = await system_options.get(db)
     return {
         "default_engine": options["default_ocr_engine"],
+        "option_keys": [option.key for option in DOCUMENT_OPTIONS],
         "engines": [
             {
                 "engine_id": engine_id,
@@ -48,18 +44,18 @@ def resolve_ocr_engine_id(engine_id: str | None, default_engine: str) -> str:
     return resolved
 
 
-async def resolve_ocr_task_params(
+async def resolve_parse_options(
     params: dict[str, Any] | None = None,
     db: AsyncSession | None = None,
-) -> dict[str, Any]:
+) -> ParseOptions:
+    """一次解析默认选择与配置，直接产生本次转换选项。"""
     resolved = dict(params or {})
-    configured_engine = resolved.get("ocr_engine")
+    configured_engine = resolved.pop("ocr_engine", None)
     if configured_engine is None:
         default_engine = (await system_options.get(db))["default_ocr_engine"]
     else:
         default_engine = str(configured_engine)
     engine_id = resolve_ocr_engine_id(configured_engine, default_engine)
-    resolved["ocr_engine"] = engine_id
     resolved.pop("ocr_engine_config", None)
 
     if engine_id == "disable":
@@ -72,8 +68,7 @@ async def resolve_ocr_task_params(
     else:
         kwargs = await _build_processor_kwargs(db, engine_id)
 
-    resolved["_ocr_processor_kwargs"] = kwargs
-    return resolved
+    return ParseOptions(ocr_engine=engine_id, processor_kwargs=kwargs, params=resolved)
 
 
 async def parse(
@@ -84,17 +79,12 @@ async def parse(
 ) -> ParseResult:
     """解析本地或 MinIO 输入，返回完整本地产物，不发布图片。"""
     suffix = Path(source.split("?", 1)[0]).suffix.lower()
-    resolved = dict(params or {})
     if suffix in OCR_FILE_EXTENSIONS:
-        resolved = await resolve_ocr_task_params(params, db)
-        engine_id = resolved["ocr_engine"]
-        if engine_id != "disable" and suffix not in get_engine_spec(engine_id).supported_extensions:
-            raise ValueError(f"OCR 引擎 {engine_id} 不支持文件类型 {suffix}")
-    options = ParseOptions(
-        ocr_engine=resolved.pop("ocr_engine", "disable"),
-        processor_kwargs=resolved.pop("_ocr_processor_kwargs", {}),
-        params=resolved,
-    )
+        options = await resolve_parse_options(params, db)
+        if options.ocr_engine != "disable" and suffix not in get_engine_spec(options.ocr_engine).supported_extensions:
+            raise ValueError(f"OCR 引擎 {options.ocr_engine} 不支持文件类型 {suffix}")
+    else:
+        options = ParseOptions(params=dict(params or {}))
     from yuxi.infrastructure.document_parsing.parser import parse as parse_local
     from yuxi.infrastructure.minio.object_urls import is_minio_url, parse_minio_url
 
@@ -170,16 +160,8 @@ async def check_all_ocr_health(db: AsyncSession) -> dict[str, Any]:
 
 
 async def _build_processor_kwargs(db: AsyncSession, engine_id: str) -> dict[str, Any]:
-    if engine_id == "mineru_ocr":
-        return await mineru_ocr_host_opts.get(db)
-    if engine_id == "mineru_official":
-        return await mineru_official_api_opts.get(db)
-    if engine_id == "pp_structure_v3_ocr":
-        opts = await pp_structure_v3_ocr_host_opts.get(db)
-        return {"server_url": opts["server_url"]} if opts["server_url"] else {}
+    """配置绑定归文档域；模型供应商仍拥有 DeepSeek 的凭据。"""
     if engine_id == "deepseek_ocr":
         return await resolve_deepseek_ocr_credentials(db)
-    if engine_id in {"paddleocr_vl_1_6", "paddleocr_pp_ocrv6"}:
-        opts = await paddleocr_api_opts.get(db)
-        return {key: value for key, value in opts.items() if value}
-    return {}
+    option = OCR_ENGINE_OPTIONS.get(engine_id)
+    return await option.get(db) if option is not None else {}

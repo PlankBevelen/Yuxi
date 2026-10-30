@@ -20,12 +20,12 @@ from pypdf import PdfWriter
 from sqlalchemy import update
 
 from test.live_api_cleanup import make_test_session_title
-from test.e2e.e2e_helpers import cleanup_uploaded_chat_attachment
+from test.e2e.e2e_helpers import archive_public_thread, cleanup_uploaded_chat_attachment, wait_for_consumed_input
 from yuxi.infrastructure.postgres.models import load_models
 from yuxi.infrastructure.minio import get_minio_client
 from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.infrastructure.redis import close_async_redis_client
 from yuxi.modules.agents.models.attachments import AgentAttachment
-from yuxi.modules.agents.repositories.sessions import SessionRepository
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 from yuxi.modules.system.models import ConfigOption
 from yuxi.modules.system.repositories.options import get_option
@@ -35,6 +35,17 @@ from yuxi.modules.workspace.filesystem import Workspace
 load_models()
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
+
+
+@pytest.fixture(autouse=True)
+async def parser_test_connections():
+    """在当前测试事件循环内创建并关闭直接回读所用连接池。"""
+    pg_manager.initialize()
+    try:
+        yield
+    finally:
+        await close_async_redis_client()
+        await pg_manager.close()
 
 
 def _result_archive() -> tuple[bytes, bytes]:
@@ -79,7 +90,6 @@ async def test_mineru_options_reach_draft_parser_and_preserve_artifacts(e2e_clie
 
     replay = ThreadingHTTPServer(("127.0.0.1", 0), MinerUReplay)
     threading.Thread(target=replay.serve_forever, daemon=True).start()
-    pg_manager.initialize()
     async with pg_manager.get_async_session_context() as db:
         previous = await get_option(db, "mineru_ocr_host_opts")
         previous_state = {"value": deepcopy(previous.value), "updated_by": previous.updated_by, "updated_at": previous.updated_at}
@@ -125,7 +135,6 @@ async def test_mineru_options_reach_draft_parser_and_preserve_artifacts(e2e_clie
                 assert await db.get(AgentAttachment, uploaded_id) is None
         await asyncio.to_thread(replay.shutdown)
         replay.server_close()
-        await pg_manager.close()
 
 
 async def test_private_draft_parse_send_and_delete_preserve_complete_local_directory(
@@ -153,6 +162,7 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
     thread = threading.Thread(target=replay.serve_forever, daemon=True)
     thread.start()
     thread_id = None
+    turn_id = None
     uploaded = None
     attachment = None
     uid = e2e_agent_context["uid"]
@@ -194,7 +204,6 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
         )
         assert parsed.status_code == 200, parsed.text
         assert parsed.json()["status"] == "parsed"
-        pg_manager.initialize()
         async with pg_manager.get_async_session_context() as db:
             draft = await db.get(AgentAttachment, uploaded["id"])
             assert draft.uid == str(uid) and draft.status == "draft" and draft.input_id is None
@@ -204,10 +213,6 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
         assert workspace.read_authorized_file(f"/{temporary_directory}/images/images/chart.png", 1024) == image
         assert await client.alist_object_metadata(client.KB_BUCKETS["documents"], parsed_name) == []
         assert await client.alist_object_metadata(client.KB_BUCKETS["images"], "unknown/") == image_objects_before
-        pg_manager.initialize()
-        async with pg_manager.get_async_session_context() as db:
-            agent_session = await SessionRepository(db).get_session_by_thread_id(thread_id)
-            agent_session.queue_paused = True
         accepted = await e2e_client.post(
             f"/api/v1/agents/sessions/{thread_id}/events",
             json={
@@ -227,7 +232,12 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
             headers={**e2e_headers, "Idempotency-Key": uuid4().hex},
         )
         assert accepted.status_code == 202, accepted.text
-        [attachment] = (await e2e_client.get(f"/api/v1/agents/sessions/{thread_id}/attachments", headers=e2e_headers)).json()["attachments"]
+        consumed = await wait_for_consumed_input(e2e_client, e2e_headers, accepted.json())
+        turn_id = consumed["turn_id"]
+        await archive_public_thread(e2e_client, e2e_headers, thread_id, turn_id=turn_id)
+        references = await e2e_client.get(f"/api/v1/agents/sessions/{thread_id}/attachments", headers=e2e_headers)
+        assert references.status_code == 200, references.text
+        [attachment] = references.json()["attachments"]
         markdown_response = await e2e_client.get(attachment["artifact_url"], headers=e2e_headers)
         assert markdown_response.status_code == 200, markdown_response.text
         assert "![chart](images/images/chart.png)" in markdown_response.text
@@ -238,18 +248,12 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
         anonymous = await e2e_client.get(image_url)
         assert anonymous.status_code == 401
         assert (await e2e_client.get(f"/api/v1/agents/files/{uploaded['id']}", headers=e2e_headers)).status_code == 409
-        pg_manager.initialize()
         async with pg_manager.get_async_session_context() as db:
             stored = await db.get(AgentAttachment, uploaded["id"])
             assert stored.status == "ready" and stored.input_id == accepted.json()["input_id"]
+            assert stored.message_id is not None
             assert stored.path == attachment["path"]
             assert stored.object_name is None and stored.parsed_source is None
-        cancelled = await e2e_client.post(
-            f"/api/v1/agents/sessions/{thread_id}/events",
-            headers={**e2e_headers, "Idempotency-Key": uuid4().hex},
-            json={"events": [{"type": "yuxi.session.input.cancel_input", "input_id": accepted.json()["input_id"]}]},
-        )
-        assert cancelled.status_code == 202, cancelled.text
         deleted = await e2e_client.delete(
             f"/api/v1/agents/sessions/{thread_id}/attachments/{attachment['file_id']}",
             headers=e2e_headers,
@@ -263,19 +267,18 @@ async def test_private_draft_parse_send_and_delete_preserve_complete_local_direc
     finally:
         restored = await e2e_client.put(
             "/api/system/config/options/mineru_ocr_host_opts",
-            json={"value": {"server_url": previous_value.get("server_url", "")}},
+            json={"value": previous_value},
             headers=e2e_headers,
         )
         assert restored.status_code == 200, restored.text
+        if thread_id:
+            await archive_public_thread(e2e_client, e2e_headers, thread_id, turn_id=turn_id)
         if thread_id and attachment:
             await e2e_client.delete(f"/api/v1/agents/sessions/{thread_id}/attachments/{attachment['file_id']}", headers=e2e_headers)
         if uploaded:
             await cleanup_uploaded_chat_attachment(uid, uploaded["id"])
-        if thread_id:
-            await e2e_client.post(f"/api/v1/agents/sessions/{thread_id}/archive", headers=e2e_headers)
         await asyncio.to_thread(replay.shutdown)
         replay.server_close()
-        await pg_manager.close()
 
 
 async def test_knowledge_worker_hosts_document_resources_and_file_delete_reclaims_objects(
@@ -299,7 +302,6 @@ async def test_knowledge_worker_hosts_document_resources_and_file_delete_reclaim
     assert created.status_code == 200, created.text
     kb_id = created.json()["kb_id"]
     client = get_minio_client()
-    pg_manager.initialize()
     try:
         uploaded = await e2e_client.post(
             f"/api/knowledge/files/upload?kb_id={kb_id}",
@@ -441,4 +443,3 @@ async def test_knowledge_worker_hosts_document_resources_and_file_delete_reclaim
     finally:
         deleted = await e2e_client.delete(f"/api/knowledge/knowledge-bases/{kb_id}", headers=e2e_headers)
         assert deleted.status_code == 200, deleted.text
-        await pg_manager.close()

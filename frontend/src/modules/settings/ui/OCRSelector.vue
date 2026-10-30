@@ -196,6 +196,7 @@ const healthClass = (engineId) => {
   if (engineId === 'disable') return 'healthy'
   if (healthLoading.value && !healthStatus(engineId)) return 'checking'
   if (!healthStatus(engineId)) return 'unknown'
+  if (healthStatus(engineId) === 'configured') return 'unknown'
   return isHealthy(engineId) ? 'healthy' : 'unhealthy'
 }
 
@@ -203,6 +204,7 @@ const healthLabel = (engineId) => {
   if (engineId === 'disable') return '无需检测'
   if (healthLoading.value && !healthStatus(engineId)) return '检测中'
   if (!healthStatus(engineId)) return '未检测'
+  if (healthStatus(engineId) === 'configured') return '已配置，未验证'
   return isHealthy(engineId) ? '可用' : '不可用'
 }
 

@@ -57,7 +57,6 @@ _OFFICE_BACKENDS = {
     ".docx": (InputFormat.DOCX, WordDocumentBackend),
     ".pptx": (InputFormat.PPTX, MsPowerpointDocumentBackend),
     ".xlsx": (InputFormat.XLSX, MsExcelDocumentBackend),
-    ".xls": (InputFormat.XLS, MsExcelDocumentBackend),
 }
 _docling_office_lock = threading.Lock()
 
@@ -206,7 +205,6 @@ def _convert_office_document(file_path: Path) -> DoclingDocument:
 
 def _convert_csv_to_markdown(file_path: Path) -> str:
     """把 CSV 的每一行渲染为独立 Markdown 表格，列类型由 pandas 推断。"""
-    import io
 
     import pandas as pd
 

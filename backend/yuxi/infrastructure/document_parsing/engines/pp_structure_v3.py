@@ -26,7 +26,7 @@ class PPStructureV3Parser(DocumentEngine):
     engine_id = "pp_structure_v3_ocr"
 
     def __init__(self, server_url: str | None = None):
-        self.server_url = server_url or os.getenv("PADDLEX_URI") or "http://localhost:8080"
+        self.server_url = server_url or "http://localhost:8080"
         self.base_url = self.server_url.rstrip("/")
         self.endpoint = f"{self.base_url}/layout-parsing"
 
@@ -75,10 +75,6 @@ class PPStructureV3Parser(DocumentEngine):
         if not self.supports_file_type(file_ext):
             raise DocumentParserException(f"不支持的文件类型: {file_ext}", self.get_service_name(), "unsupported_file_type")
 
-        health = self.check_health()
-        if health["status"] != "healthy":
-            raise DocumentParserException(f"PP-Structure-V3 服务不可用: {health['message']}", self.get_service_name(), health["status"])
-
         try:
             start_time = time.time()
             params = params or {}
@@ -100,13 +96,9 @@ class PPStructureV3Parser(DocumentEngine):
                     "api_error",
                 )
 
-            result = self._parse_api_result(api_result, output_dir)
-            text = result["full_text"]
+            text = self._parse_api_result(api_result, output_dir)
             processing_time = time.time() - start_time
             logger.info(f"PP-Structure-V3 处理成功: {os.path.basename(file_path)} - {len(text)} 字符 ({processing_time:.2f}s)")
-
-            summary = result["summary"]
-            logger.info(f"  统计: {summary.get('total_tables', 0)} 表格, {summary.get('total_formulas', 0)} 公式")
 
             return text
 
@@ -118,19 +110,6 @@ class PPStructureV3Parser(DocumentEngine):
             logger.error(f"{error_msg} ({processing_time:.2f}s)")
             raise DocumentParserException(error_msg, self.get_service_name(), "processing_failed") from e
 
-    def _process_file_input(self, file_input: str) -> str:
-        """把本地文件编码为 Base64；URL 与已有 Base64 内容原样返回。"""
-        if os.path.exists(file_input):
-            logger.info(f"PP-Structure-V3 本地文件输入: {file_input} ({os.path.getsize(file_input) / 1024 / 1024:.2f} MB)")
-            return self._encode_file_to_base64(file_input)
-
-        if file_input.startswith(("http://", "https://")):
-            logger.info(f"PP-Structure-V3 URL 输入: {file_input}")
-            return file_input
-
-        logger.info(f"PP-Structure-V3 Base64 输入，长度: {len(file_input)} 字符")
-        return file_input
-
     def _call_layout_api(
         self,
         file_input: str,
@@ -141,7 +120,7 @@ class PPStructureV3Parser(DocumentEngine):
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """调用版面解析 API，返回协议 JSON。"""
-        payload = {"file": self._process_file_input(file_input)}
+        payload = {"file": base64.b64encode(Path(file_input).read_bytes()).decode("utf-8")}
         optional_params = {
             "fileType": file_type,
             "useTableRecognition": use_table_recognition,
@@ -164,44 +143,24 @@ class PPStructureV3Parser(DocumentEngine):
         error_prefix = f"PP-Structure-V3 API请求失败: {response.status_code}"
         raise DocumentParserException(f"{error_prefix}: {response.text}", self.get_service_name(), "api_error")
 
-    def _parse_api_result(self, api_result: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-        """保存页面图片，汇总 Markdown 正文与表格/公式统计。"""
-        layout_results = api_result.get("result", {}).get("layoutParsingResults", [])
-        text_parts: list[str] = []
-        total_tables = 0
-        total_formulas = 0
-
+    def _parse_api_result(self, api_result: dict[str, Any], output_dir: Path) -> str:
+        """校验结果结构并保存正文引用的完整图片。"""
+        layout_results = api_result["result"]["layoutParsingResults"]
+        if not isinstance(layout_results, list):
+            raise ValueError("layoutParsingResults 必须是列表")
+        text_parts = []
         for page_result in layout_results:
-            if "markdown" in page_result:
-                markdown = page_result["markdown"]
-                text = markdown.get("text")
-                if text:
-                    mapping = {}
-                    for image_path, image_url in (markdown.get("images") or {}).items():
-                        response = requests.get(image_url, timeout=60)
-                        response.raise_for_status()
-                        suffix = Path(image_path).suffix or ".png"
-                        local_path = save_resource(output_dir, f"images/{uuid4().hex}{suffix}", response.content)
-                        mapping[str(image_path)] = local_path
-                        mapping[str(image_url)] = local_path
-                    text_parts.append(replace_image_links(text, mapping))
-
-            if "prunedResult" in page_result:
-                pruned = page_result["prunedResult"]
-                total_tables += len(pruned.get("table_result", []))
-                total_formulas += len(pruned.get("formula_result", []))
-
-        full_text = "\n\n".join(text_parts)
-        return {
-            "full_text": full_text,
-            "summary": {
-                "total_tables": total_tables,
-                "total_formulas": total_formulas,
-                "total_characters": len(full_text),
-            },
-        }
-
-    def _encode_file_to_base64(self, file_path: str) -> str:
-        """将文件编码为 Base64。"""
-        with open(file_path, "rb") as file:
-            return base64.b64encode(file.read()).decode("utf-8")
+            markdown = page_result["markdown"]
+            text = markdown["text"]
+            if not isinstance(text, str):
+                raise ValueError("Markdown 正文必须是字符串")
+            mapping = {}
+            for image_path, image_url in (markdown.get("images") or {}).items():
+                response = requests.get(image_url, timeout=60)
+                response.raise_for_status()
+                suffix = Path(image_path).suffix or ".png"
+                local_path = save_resource(output_dir, f"images/{uuid4().hex}{suffix}", response.content)
+                mapping[str(image_path)] = local_path
+                mapping[str(image_url)] = local_path
+            text_parts.append(replace_image_links(text, mapping))
+        return "\n\n".join(text_parts)

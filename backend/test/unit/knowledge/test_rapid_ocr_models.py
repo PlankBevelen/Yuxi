@@ -12,6 +12,68 @@ from rapidocr import ModelType, OCRVersion
 from yuxi.infrastructure.document_parsing.engines.rapid_ocr import RapidOCRParser
 
 
+def test_concurrent_first_use_shares_one_model(monkeypatch):
+    """并发首次请求共享同一个完成初始化的模型。"""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    parser = RapidOCRParser()
+    start = threading.Barrier(2)
+    entered = threading.Event()
+    release = threading.Event()
+    models = []
+
+    def construct(**kwargs):
+        """阻塞初始化，让另一个请求竞争同一未加载实例。"""
+        model = object()
+        models.append(model)
+        entered.set()
+        assert release.wait(5)
+        return model
+
+    def load():
+        """返回请求实际取得的模型身份。"""
+        start.wait(5)
+        parser._load_model()
+        return parser.ocr
+
+    monkeypatch.setattr("yuxi.infrastructure.document_parsing.engines.rapid_ocr.RapidOCR", construct)
+    monkeypatch.setattr(parser, "_get_model_params", lambda: {})
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(load) for _ in range(2)]
+        assert entered.wait(5)
+        release.set()
+        actual = [future.result(5) for future in futures]
+    assert actual[0] is actual[1] is models[0]
+    assert len(models) == 1
+
+
+@pytest.mark.parametrize("array", [False, True])
+def test_memory_image_preserves_color_without_temporary_file(tmp_path, array):
+    """用依赖的真实图像加载器确认内存输入与 PNG 的颜色语义一致。"""
+    import numpy as np
+    from PIL import Image
+    from rapidocr.utils.load_image import LoadImage
+    from types import SimpleNamespace
+
+    image = Image.new("RGB", (4, 4), (255, 50, 10))
+    reference = tmp_path / "reference.png"
+    image.save(reference)
+    expected = LoadImage()(str(reference))
+    received = []
+
+    def recognize(value):
+        """从传给依赖的真实输入回读像素。"""
+        assert not isinstance(value, str)
+        received.append(LoadImage()(value))
+        return SimpleNamespace(txts=["recognized"])
+
+    parser = RapidOCRParser()
+    parser.ocr = recognize
+    assert parser.process_image(np.asarray(image) if array else image) == "recognized"
+    np.testing.assert_array_equal(received[0], expected)
+
+
 def _wheel_models_dir() -> Path:
     return Path(sysconfig.get_paths()["purelib"]) / "rapidocr" / "models"
 

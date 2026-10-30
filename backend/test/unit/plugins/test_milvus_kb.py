@@ -64,11 +64,25 @@ class FakeKnowledgeFileRepository:
     async def get_by_file_id(self, file_id: str, *, include_deleted: bool = False):
         return self.records.get(file_id)
 
-    async def update_fields_if_status(self, *, kb_id: str, file_id: str, allowed_statuses: set[str], data: dict):
+    async def update_fields_if_status(
+        self,
+        *,
+        kb_id: str,
+        file_id: str,
+        allowed_statuses: set[str],
+        data: dict,
+        processing_params: dict | None = None,
+        kb_additional_params: dict | None = None,
+    ):
+        """模拟已取得文件执行权后的参数合并，真实并发由 PG 测试验证。"""
         record = self.records.get(file_id)
         self.conditional_update_calls.append((kb_id, file_id, set(allowed_statuses), dict(data)))
         if record is None or record.kb_id != kb_id or record.status not in allowed_statuses:
             return None
+        if kb_additional_params is not None:
+            from yuxi.modules.knowledge.utils.kb_utils import resolve_processing_params
+
+            record.processing_params = resolve_processing_params(kb_additional_params, record.processing_params, processing_params)
         for key, value in data.items():
             setattr(record, key, value)
         return record

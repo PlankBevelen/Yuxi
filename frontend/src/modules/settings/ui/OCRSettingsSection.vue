@@ -15,7 +15,8 @@
           <div class="settings-form-control is-compact">
             <OCRSelector
               :model-value="configStore.config?.default_ocr_engine"
-              @update:model-value="configStore.setConfigValue('default_ocr_engine', $event)"
+              :disabled="savingDefault"
+              @update:model-value="saveDefaultEngine"
             />
           </div>
         </div>
@@ -145,29 +146,37 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { configOptionsApi } from '@/apis/system_api'
+import { configOptionsApi, ocrApi } from '@/apis/system_api'
 import { useConfigStore } from '@/modules/settings/model/config'
 import OCRSelector from '@/modules/settings/ui/OCRSelector.vue'
 
 const configStore = useConfigStore()
-const OCR_OPTION_KEYS = new Set([
-  'mineru_ocr_host_opts',
-  'mineru_official_api_opts',
-  'pp_structure_v3_ocr_host_opts',
-  'paddleocr_api_opts'
-])
 const items = computed(() => configStore.config?._config_items || {})
 const configOptions = ref([])
 const editingKey = ref('')
 const draftValue = ref({})
 const clearedFields = ref({})
 const savingOption = ref('')
+const savingDefault = ref(false)
+
+const saveDefaultEngine = async (engine) => {
+  if (savingDefault.value) return
+  savingDefault.value = true
+  try {
+    await configStore.setConfigValue('default_ocr_engine', engine)
+  } catch (error) {
+    message.error(error.message || '保存默认 OCR 方法失败')
+  } finally {
+    savingDefault.value = false
+  }
+}
 
 const loadConfigOptions = async () => {
   try {
-    const data = await configOptionsApi.getOptions()
+    const [data, directory] = await Promise.all([configOptionsApi.getOptions(), ocrApi.getOptions()])
+    const optionKeys = new Set(directory.option_keys)
     configOptions.value = (data.options || [])
-      .filter((option) => OCR_OPTION_KEYS.has(option.key))
+      .filter((option) => optionKeys.has(option.key))
       .map((option) => ({
         ...option,
         value: { ...(option.value || {}) },

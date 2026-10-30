@@ -450,9 +450,13 @@ class KnowledgeFileRepository:
         data: dict[str, Any],
         processing_job_id: str | None = None,
         processing_owner: str | None = None,
+        processing_params: dict | None = None,
+        kb_additional_params: dict | None = None,
     ) -> KnowledgeFile | None:
         lease_job_id = processing_job_id or data.get("processing_job_id")
         lease_owner = processing_owner or data.get("processing_owner")
+        if (lease_job_id is None) != (lease_owner is None):
+            raise ValueError("File processing owner must include job and worker")
         sanitized_data = self._sanitize_data(data)
         if not sanitized_data:
             return await self.get_by_file_id(file_id)
@@ -487,19 +491,24 @@ class KnowledgeFileRepository:
                 )
                 if job_record is None:
                     return None
-                file_record = await session.scalar(select(KnowledgeFile).where(*filters).with_for_update())
-                if file_record is None:
-                    return None
+            file_record = await session.scalar(select(KnowledgeFile).where(*filters).with_for_update())
+            if file_record is None:
+                return None
+            if lease_job_id is not None:
                 database_now = await session.scalar(select(func.clock_timestamp()))
                 if job_record.lease_expires_at is None or job_record.lease_expires_at <= database_now:
                     return None
-                for key, value in sanitized_data.items():
-                    setattr(file_record, key, value)
-                await session.flush()
-                return file_record
+            if kb_additional_params is not None:
+                from yuxi.modules.knowledge.utils.kb_utils import resolve_processing_params
 
-            result = await session.execute(update(KnowledgeFile).where(*filters).values(**sanitized_data).returning(KnowledgeFile))
-            return result.scalar_one_or_none()
+                # 参数与领取状态在同一行锁和事务内确定，落败请求不能预写参数。
+                sanitized_data["processing_params"] = resolve_processing_params(
+                    kb_additional_params, file_record.processing_params, processing_params
+                )
+            for key, value in sanitized_data.items():
+                setattr(file_record, key, value)
+            await session.flush()
+            return file_record
 
     async def begin_index_generation(
         self, *, kb_id: str, file_id: str, processing_job_id: str | None = None, processing_owner: str | None = None
@@ -558,7 +567,22 @@ class KnowledgeFileRepository:
 
     @staticmethod
     async def _lock_index_owner(session, *, kb_id, file_id, processing_job_id, processing_owner):
-        """在文件自身的锁与版本事实下拒绝删除和替换后的旧完成回调。"""
+        """按 Job → File 锁序核验执行资格，等文件锁后重新核对租约。"""
+        if (processing_job_id is None) != (processing_owner is None):
+            raise ValueError("File indexing owner must include job and worker")
+        job = None
+        if processing_job_id is not None:
+            job = await session.scalar(
+                select(BackgroundJobRecord)
+                .where(
+                    BackgroundJobRecord.id == processing_job_id,
+                    BackgroundJobRecord.status == "running",
+                    BackgroundJobRecord.worker_id == processing_owner,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                raise ValueError("File indexing owner was lost")
         record = await session.scalar(
             select(KnowledgeFile)
             .where(
@@ -574,6 +598,10 @@ class KnowledgeFileRepository:
             processing_owner,
         ):
             raise ValueError("File indexing owner was lost")
+        if job is not None:
+            database_now = await session.scalar(select(func.clock_timestamp()))
+            if job.lease_expires_at is None or job.lease_expires_at <= database_now:
+                raise ValueError("File indexing owner lease expired")
         return record
 
     @staticmethod

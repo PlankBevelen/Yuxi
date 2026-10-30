@@ -459,6 +459,12 @@ jobs:
       - name: Verify deterministic Agent lifecycle
         timeout-minutes: 25
         run: CI_TEST_REPORT_DIR=test/ci-reports TEST_USERNAME="$E2E_USERNAME" TEST_PASSWORD="$E2E_PASSWORD" bash backend/test/run_tests.sh e2e
+      - name: Verify OCR configuration and complete parsing artifacts
+        timeout-minutes: 8
+        run: |
+          docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api \
+            uv run --no-sync --no-dev pytest --junitxml=test/ci-reports/system-ocr.xml --durations=20 \
+            test/e2e/test_ocr_config_center_e2e.py test/e2e/test_document_parsing_artifacts_e2e.py -q
       - name: Verify identity transaction and replayable secret publication
         run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest --junitxml=test/ci-reports/system-28.xml --durations=20 test/integration/services/test_identity_admin_service.py test/integration/services/test_api_key_user_lifecycle.py test/integration/api/test_apikey_router.py -q
       - name: Verify department HTTP counts and lifecycle

@@ -168,28 +168,6 @@ class FakeDefinition:
         return None
 
 
-class FakeKnowledgeJobContext:
-    """为知识作业测试保存 payload 与最终结果。"""
-
-    def __init__(self, payload: dict):
-        self.job_id = "job-1"
-        self.worker_id = "worker-1"
-        self.payload = payload
-        self.result = None
-
-    async def set_message(self, _message: str) -> None:
-        pass
-
-    async def set_progress(self, _progress: float, _message: str | None = None) -> None:
-        pass
-
-    async def set_result(self, result: dict) -> None:
-        self.result = result
-
-    async def raise_if_cancelled(self) -> None:
-        pass
-
-
 async def test_arq_publication_uses_fresh_messages_instead_of_stale_job_lock(monkeypatch):
     calls = []
 
@@ -607,15 +585,16 @@ async def test_document_job_failure_keeps_details_and_rejects_success(monkeypatc
     }
     if failure == "params":
         payload["params"] = {"chunk_size": 10}
-    context = FakeKnowledgeJobContext(payload)
     calls = []
 
-    async def update_params(_kb_id, file_id, _params, **_kwargs):
-        if file_id == "bad":
-            raise RuntimeError("参数更新失败")
+    async def process(_kb_id, file_id, *, params, **_kwargs):
+        """在动作拥有的参数领取或执行阶段注入失败。"""
+        from yuxi.modules.knowledge.chunking.presets import ChunkConfigError
 
-    async def process(_kb_id, file_id, **_kwargs):
+        assert params == payload.get("params", {})
         calls.append(file_id)
+        if file_id == "bad" and failure == "params":
+            raise ChunkConfigError("参数领取失败")
         if file_id == "bad" and failure == "exception":
             raise RuntimeError("处理失败")
         return {"file_id": file_id, "status": "failed" if file_id == "bad" and failure == "result" else "parsed"}
@@ -623,20 +602,25 @@ async def test_document_job_failure_keeps_details_and_rejects_success(monkeypatc
     async def pending(_kb_id, *, after_file_id, **_kwargs):
         return [] if after_file_id else ["ok", "bad"]
 
-    monkeypatch.setattr(knowledge_job_service.knowledge_base, "update_file_params", update_params)
     monkeypatch.setattr(knowledge_job_service.knowledge_base, f"{action}_file", process)
     monkeypatch.setattr(knowledge_job_service.knowledge_base, "list_document_file_ids_by_statuses", pending)
     handler = knowledge_job_service.run_knowledge_parse if action == "parse" else knowledge_job_service.run_knowledge_index
+    record = make_record(type=f"knowledge_{action}", payload=payload)
+    repository = FakeRepo(record)
+    monkeypatch.setattr(job_service, "BackgroundJobRepository", lambda: repository)
+    monkeypatch.setattr(job_worker, "get_job_definition", lambda *_args: FakeDefinition(handler))
+
+    await process_background_job({"worker_id": "worker-1"}, record.id)
+
+    assert record.status == ("failed" if failure else "success")
+    assert calls == ["ok", "bad"]
+    assert record.result["processed"] == 2
+    assert record.result["failed"] == int(bool(failure))
+    assert record.result["succeeded"] == 2 - int(bool(failure))
+    assert [item["file_id"] for item in record.result["items"]] == ["ok", "bad"]
+    assert record.result["items"][1]["status"] == ("failed" if failure else "parsed")
     if failure:
-        with pytest.raises(RuntimeError, match="失败 1 个"):
-            await handler(context)
-    else:
-        assert await handler(context) == context.result
-    assert calls == (["ok"] if failure == "params" else ["ok", "bad"])
-    assert context.result["processed"] == 2
-    assert context.result["failed"] == int(bool(failure))
-    assert context.result["succeeded"] == 2 - int(bool(failure))
-    assert [item["file_id"] for item in context.result["items"]] == ["ok", "bad"]
+        assert "失败 1 个" in record.error
 
 
 async def test_registration_returns_repository_record_without_state_copy(monkeypatch):

@@ -15,7 +15,7 @@ from yuxi.modules.knowledge.chunking.presets import ensure_chunk_defaults_in_add
 from yuxi.modules.knowledge.file_status import FileStatus
 from yuxi.modules.knowledge.read_models import KnowledgeBaseConfig
 from yuxi.modules.knowledge.schemas import FindOutputSchema, FindWindowSchema, SearchOutputSchema, SearchResultSchema
-from yuxi.modules.knowledge.utils import resolve_processing_params, sanitize_processing_params
+from yuxi.modules.knowledge.utils import sanitize_processing_params
 from yuxi.modules.knowledge.utils.kb_utils import build_kb_image_proxy_url
 from yuxi.shared.datetime import utc_isoformat
 from yuxi.shared.errors import StateConflictError
@@ -107,6 +107,7 @@ class KnowledgeExecutor(ABC):
         file_id: str,
         operator_id: str | None = None,
         *,
+        params: dict | None = None,
         additional_params: dict[str, Any],
         processing_job_id: str | None = None,
         processing_owner: str | None = None,
@@ -120,6 +121,7 @@ class KnowledgeExecutor(ABC):
                 file_id,
                 operator_id,
                 additional_params=additional_params,
+                params=params,
                 processing_job_id=processing_job_id,
                 processing_owner=processing_owner,
             )
@@ -130,6 +132,7 @@ class KnowledgeExecutor(ABC):
         file_id: str,
         operator_id: str | None = None,
         *,
+        params: dict | None = None,
         additional_params: dict[str, Any],
         processing_job_id: str | None = None,
         processing_owner: str | None = None,
@@ -183,6 +186,8 @@ class KnowledgeExecutor(ABC):
             file_id=file_id,
             allowed_statuses=allowed_statuses,
             data=claim_data,
+            processing_params=params,
+            kb_additional_params=additional_params,
         )
         if claimed_record is None:
             current_meta = await self._load_file_meta(kb_id, file_id)
@@ -203,10 +208,7 @@ class KnowledgeExecutor(ABC):
         try:
             from yuxi.modules.documents.service import parse_to_hosted_markdown
 
-            params = resolve_processing_params(
-                kb_additional_params=additional_params,
-                file_processing_params=file_meta.get("processing_params"),
-            )
+            params = file_meta["processing_params"]
 
             markdown_content = await parse_to_hosted_markdown(
                 source=file_path,
@@ -281,42 +283,6 @@ class KnowledgeExecutor(ABC):
     ) -> dict:
         """索引已解析文件（状态 INDEXING → INDEXED/ERROR_INDEXING）。"""
         pass
-
-    async def update_file_params(
-        self,
-        kb_id: str,
-        file_id: str,
-        params: dict,
-        operator_id: str | None = None,
-        *,
-        additional_params: dict[str, Any],
-    ) -> None:
-        """更新文件处理参数。"""
-        if not params:
-            return
-
-        file_meta = await self._load_file_meta(kb_id, file_id)
-        current_params = file_meta.get("processing_params", {}) or {}
-        logger.debug(f"[update_file_params] file_id={file_id}, current_params={current_params}, new_params={params}")
-
-        current_params = resolve_processing_params(
-            kb_additional_params=additional_params,
-            file_processing_params=current_params,
-            request_params=params,
-        )
-
-        logger.debug(f"[update_file_params] file_id={file_id}, updated_params={current_params}")
-
-        from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
-
-        update_data = {"processing_params": sanitize_processing_params(current_params)}
-        if operator_id:
-            update_data["updated_by"] = operator_id
-        record = await KnowledgeFileRepository().update_fields(file_id=file_id, kb_id=kb_id, data=update_data)
-        if record is None:
-            raise ValueError(f"File {file_id} not found")
-
-    # ==== 文件读取 ====
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:
         """获取文件基本信息（仅元数据）。"""

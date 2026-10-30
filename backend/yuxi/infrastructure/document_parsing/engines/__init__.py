@@ -1,6 +1,7 @@
 """OCR 引擎契约、声明与惰性实例装配。"""
 
 import hashlib
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from importlib import import_module
@@ -35,7 +36,7 @@ class DocumentEngine(ABC):
 
 
 _STANDARD_OCR_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif")
-_MINERU_OFFICIAL_EXTENSIONS = (".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg")
+_MINERU_OFFICIAL_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg")
 _DEEPSEEK_OCR_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
@@ -125,19 +126,22 @@ def get_ocr_engines_for_extension(extension: str) -> tuple[str, ...]:
 
 
 _ENGINE_CACHE: dict[str, tuple[str, DocumentEngine]] = {}
+_ENGINE_CACHE_LOCK = threading.Lock()
 
 
 def get_engine(engine_id: str, **kwargs: Any) -> DocumentEngine:
     """按有效配置惰性加载引擎，配置变化时替换该引擎实例。"""
     spec = get_engine_spec(engine_id)
     fingerprint = _configuration_fingerprint(kwargs)
-    cached = _ENGINE_CACHE.get(engine_id)
-    if cached is not None and cached[0] == fingerprint:
-        return cached[1]
-    engine_type = getattr(import_module(spec.module_path), spec.class_name)
-    engine = engine_type(**kwargs)
-    _ENGINE_CACHE[engine_id] = (fingerprint, engine)
-    return engine
+    # 构造仅装配配置；耗时模型加载由实例自己的锁负责。
+    with _ENGINE_CACHE_LOCK:
+        cached = _ENGINE_CACHE.get(engine_id)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        engine_type = getattr(import_module(spec.module_path), spec.class_name)
+        engine = engine_type(**kwargs)
+        _ENGINE_CACHE[engine_id] = (fingerprint, engine)
+        return engine
 
 
 def _configuration_fingerprint(kwargs: dict[str, Any]) -> str:

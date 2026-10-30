@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 from test.live_api_cleanup import (
     make_test_session_title,
 )
-from test.e2e.e2e_helpers import cleanup_uploaded_chat_attachment
+from test.e2e.e2e_helpers import archive_public_thread, cleanup_uploaded_chat_attachment, wait_for_consumed_input
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
 
@@ -29,6 +29,7 @@ async def test_admin_ocr_config_drives_real_tmp_attachment_parse(
     image_path = tmp_path / "ocr-config-center.png"
     _build_ocr_image(image_path)
     thread_id = None
+    turn_id = None
     uploaded = None
     parsed = None
     attachment = None
@@ -76,13 +77,6 @@ async def test_admin_ocr_config_drives_real_tmp_attachment_parse(
         parsed = parse_response.json()
         assert parsed["parse_method"] == "rapid_ocr"
 
-        from yuxi.infrastructure.postgres.manager import pg_manager
-        from yuxi.modules.agents.repositories.sessions import SessionRepository
-
-        pg_manager.initialize()
-        async with pg_manager.get_async_session_context() as db:
-            session = await SessionRepository(db).get_session_by_thread_id(thread_id)
-            session.queue_paused = True
         accepted = await e2e_client.post(
             f"/api/v1/agents/sessions/{thread_id}/events",
             headers={**e2e_headers, "Idempotency-Key": uuid4().hex},
@@ -102,13 +96,13 @@ async def test_admin_ocr_config_drives_real_tmp_attachment_parse(
             },
         )
         assert accepted.status_code == 202, accepted.text
-        [attachment] = (await e2e_client.get(f"/api/v1/agents/sessions/{thread_id}/attachments", headers=e2e_headers)).json()["attachments"]
-        cancelled = await e2e_client.post(
-            f"/api/v1/agents/sessions/{thread_id}/events",
-            headers={**e2e_headers, "Idempotency-Key": uuid4().hex},
-            json={"events": [{"type": "yuxi.session.input.cancel_input", "input_id": accepted.json()["input_id"]}]},
-        )
-        assert cancelled.status_code == 202, cancelled.text
+        consumed = await wait_for_consumed_input(e2e_client, e2e_headers, accepted.json())
+        turn_id = consumed["turn_id"]
+        # 消费后由 Turn 终止执行；Input 撤销只适用于仍未领取的提交。
+        await archive_public_thread(e2e_client, e2e_headers, thread_id, turn_id=turn_id)
+        references = await e2e_client.get(f"/api/v1/agents/sessions/{thread_id}/attachments", headers=e2e_headers)
+        assert references.status_code == 200, references.text
+        [attachment] = references.json()["attachments"]
         assert attachment["status"] == "parsed"
         assert attachment["path"].endswith(".md")
         assert attachment["artifact_url"]
@@ -135,6 +129,7 @@ async def test_admin_ocr_config_drives_real_tmp_attachment_parse(
                 e2e_client=e2e_client,
                 e2e_headers=e2e_headers,
                 thread_id=thread_id,
+                turn_id=turn_id,
                 attachment=attachment,
                 uploaded=uploaded,
                 parsed=parsed,
@@ -156,11 +151,15 @@ async def _cleanup_created_resources(
     e2e_client: httpx.AsyncClient,
     e2e_headers: dict[str, str],
     thread_id: str | None,
+    turn_id: str | None,
     attachment: dict | None,
     uploaded: dict | None,
     parsed: dict | None,
 ) -> None:
     """删除 E2E 创建的正式附件、临时 MinIO 对象和对话线程。"""
+
+    if thread_id:
+        await archive_public_thread(e2e_client, e2e_headers, thread_id, turn_id=turn_id)
 
     if thread_id and attachment:
         response = await e2e_client.delete(
@@ -172,7 +171,3 @@ async def _cleanup_created_resources(
     if uploaded:
         me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
         await cleanup_uploaded_chat_attachment(str(me.json()["uid"]), uploaded["id"])
-
-    if thread_id:
-        response = await e2e_client.post(f"/api/v1/agents/sessions/{thread_id}/archive", headers=e2e_headers)
-        assert response.status_code == 200, response.text

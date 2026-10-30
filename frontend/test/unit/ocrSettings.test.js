@@ -16,7 +16,8 @@ before(async () => {
     plugins: [{ name: 'ocr-api-boundary', enforce: 'pre', load(id) {
       if (id.endsWith('/src/apis/system_api.js')) return `
         export const configOptionsApi = new Proxy({}, { get: (_, key) => globalThis.__ocrTestApi[key] })
-        export const configApi = {}`
+        export const configApi = new Proxy({}, { get: (_, key) => globalThis.__ocrConfigApi?.[key] })
+        export const ocrApi = { getOptions: async () => ({ option_keys: globalThis.__ocrOptionKeys || ['mineru_ocr_host_opts', 'mineru_official_api_opts'] }) }`
     } }]
   })
   ;({ default: component } = await server.ssrLoadModule('/src/modules/settings/ui/OCRSettingsSection.vue'))
@@ -25,6 +26,7 @@ after(async () => {
   await server?.close()
   disposePinia(pinia)
   Object.assign(message, originalMessage)
+  delete globalThis.__ocrConfigApi
   delete globalThis.__ocrTestApi
 })
 
@@ -144,4 +146,41 @@ test('Official 默认模型兼容旧记录，修改模型保留凭据，清除�
   form.draftValue.value.api_key = 'fixture-new-key'
   await form.saveOption(current)
   assert.equal(secret, 'fixture-new-key')
+})
+
+
+test('默认 OCR 在请求成功前和失败后都保留持久值', async () => {
+  const { useConfigStore } = await server.ssrLoadModule('/src/modules/settings/model/config.js')
+  const store = useConfigStore(pinia)
+  store.config = { default_ocr_engine: 'rapid_ocr' }
+  let complete
+  globalThis.__ocrConfigApi = { updateConfigBatch: () => new Promise(resolve => { complete = resolve }) }
+  const pending = store.setConfigValue('default_ocr_engine', 'mineru_ocr')
+  try {
+    assert.equal(store.config.default_ocr_engine, 'rapid_ocr')
+  } finally {
+    complete({ default_ocr_engine: 'mineru_ocr' })
+    await pending
+  }
+  assert.equal(store.config.default_ocr_engine, 'mineru_ocr')
+  globalThis.__ocrConfigApi.updateConfigBatch = async () => { throw new Error('保存被拒绝') }
+  await assert.rejects(store.setConfigValue('default_ocr_engine', 'deepseek_ocr'), /保存被拒绝/)
+  assert.equal(store.config.default_ocr_engine, 'mineru_ocr')
+})
+
+test('新增服务配置由后端目录决定，无须前端硬编码 key', async () => {
+  globalThis.__ocrOptionKeys = ['fixture_ocr_option']
+  try {
+    const form = await createForm({
+      message: { success() {}, error: assert.fail },
+      configOptionsApi: { getOptions: async () => ({ options: [
+        { key: 'fixture_ocr_option', params: { fields: [] }, value: {} },
+        { key: 'unrelated_option', params: { fields: [] }, value: {} }
+      ] }) }
+    })
+    await form.loadConfigOptions()
+    assert.deepEqual(form.configOptions.value.map(option => option.key), ['fixture_ocr_option'])
+  } finally {
+    delete globalThis.__ocrOptionKeys
+  }
 })

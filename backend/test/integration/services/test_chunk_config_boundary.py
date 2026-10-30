@@ -25,6 +25,7 @@ from yuxi.modules.background_jobs.models import BackgroundJobRecord
 from yuxi.modules.knowledge.implementations.milvus import MilvusKB
 from yuxi.modules.knowledge.models import KnowledgeBase, KnowledgeFile
 from yuxi.modules.knowledge.repositories import bases as bases_repository
+from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
 
@@ -168,69 +169,108 @@ async def test_bad_persisted_knowledge_config_can_be_read_and_repaired(boundary)
         assert row.additional_params["chunk_preset_id"] == "qa"
 
 
-async def test_valid_file_update_repairs_persisted_config(boundary):
-    """显式更新校验合并后的配置，独立读取文件记录确认修复。"""
+async def test_file_claim_repairs_persisted_config(boundary):
+    """领取文件时修复配置，状态与参数在同一事务发布。"""
     _, factory = boundary
     async with factory() as db, db.begin():
         db.add(
-            KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", processing_params={"chunk_preset_id": "typo"})
+            KnowledgeFile(
+                file_id="fixture-file",
+                kb_id="fixture-kb",
+                filename="fixture.md",
+                status="uploaded",
+                processing_params={"chunk_preset_id": "typo"},
+            )
         )
-    executor = object.__new__(MilvusKB)
     patch = {"chunk_preset_id": "qa", "chunk_parser_config": {"chunk_token_num": 256}}
-    await executor.update_file_params("fixture-kb", "fixture-file", patch, additional_params={})
+    await KnowledgeFileRepository().update_fields_if_status(
+        kb_id="fixture-kb",
+        file_id="fixture-file",
+        allowed_statuses={"uploaded"},
+        data={"status": "parsing", "updated_by": "modifier"},
+        processing_params=patch,
+        kb_additional_params={},
+    )
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
+        assert row.status == "parsing" and row.updated_by == "modifier"
         assert row.processing_params["chunk_preset_id"] == "qa"
         assert row.processing_params["chunk_parser_config"] == {"chunk_token_num": 256}
 
 
-async def test_empty_file_patch_preserves_current_chunk_configuration(boundary):
+async def test_file_claim_empty_patch_preserves_current_chunk_configuration(boundary):
     """缺省补丁保留文件覆盖值和已有解析参数。"""
     _, factory = boundary
     original = {"chunk_preset_id": "qa", "chunk_parser_config": {"chunk_token_num": 256}}
     async with factory() as db, db.begin():
-        db.add(KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", processing_params=original))
-    await object.__new__(MilvusKB).update_file_params(
-        "fixture-kb",
-        "fixture-file",
-        {"chunk_preset_id": "", "chunk_parser_config": None},
-        additional_params={"chunk_preset_id": "book"},
+        db.add(
+            KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", status="uploaded", processing_params=original)
+        )
+    await KnowledgeFileRepository().update_fields_if_status(
+        kb_id="fixture-kb",
+        file_id="fixture-file",
+        allowed_statuses={"uploaded"},
+        data={"status": "parsing", "updated_by": "modifier"},
+        processing_params={"chunk_preset_id": "", "chunk_parser_config": None},
+        kb_additional_params={"chunk_preset_id": "book"},
     )
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
+        assert row.status == "parsing" and row.updated_by == "modifier"
         assert row.processing_params["chunk_preset_id"] == "qa"
         assert row.processing_params["chunk_parser_config"] == original["chunk_parser_config"]
 
 
 @pytest.mark.parametrize("invalid", [False, 0, []])
-async def test_invalid_file_patch_leaves_persisted_configuration_unchanged(boundary, invalid):
-    """假值非法补丁也必须拒绝，不能被空值继承逻辑忽略。"""
+async def test_invalid_file_claim_leaves_persisted_state_unchanged(boundary, invalid):
+    """非法补丁使领取事务回滚，参数、状态和操作者都保持原值。"""
     from yuxi.modules.knowledge.chunking.presets import ChunkConfigError
 
     _, factory = boundary
     original = {"chunk_preset_id": "book"}
     async with factory() as db, db.begin():
-        db.add(KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", processing_params=original))
+        db.add(
+            KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", status="uploaded", processing_params=original)
+        )
     with pytest.raises(ChunkConfigError, match="chunk_preset_id"):
-        await object.__new__(MilvusKB).update_file_params(
-            "fixture-kb", "fixture-file", {"chunk_preset_id": invalid}, operator_id="modifier", additional_params={}
+        await KnowledgeFileRepository().update_fields_if_status(
+            kb_id="fixture-kb",
+            file_id="fixture-file",
+            allowed_statuses={"uploaded"},
+            data={"status": "parsing", "updated_by": "modifier"},
+            processing_params={"chunk_preset_id": invalid},
+            kb_additional_params={},
         )
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
         assert row.processing_params == original
+        assert row.status == "uploaded"
+        assert row.processing_job_id is None and row.processing_owner is None
         assert row.updated_by is None
 
 
-async def test_file_update_replaces_non_chunk_nested_options(boundary):
+async def test_file_claim_replaces_non_chunk_nested_options(boundary):
     """普通处理选项仍由请求整体覆盖，不递归保留已删除的键。"""
     _, factory = boundary
     async with factory() as db, db.begin():
         db.add(
             KnowledgeFile(
-                file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", processing_params={"custom": {"keep": 1, "removed": 2}}
+                file_id="fixture-file",
+                kb_id="fixture-kb",
+                filename="fixture.md",
+                status="uploaded",
+                processing_params={"custom": {"keep": 1, "removed": 2}},
             )
         )
-    await object.__new__(MilvusKB).update_file_params("fixture-kb", "fixture-file", {"custom": {"keep": 3}}, additional_params={})
+    await KnowledgeFileRepository().update_fields_if_status(
+        kb_id="fixture-kb",
+        file_id="fixture-file",
+        allowed_statuses={"uploaded"},
+        data={"status": "parsing", "updated_by": "modifier"},
+        processing_params={"custom": {"keep": 3}},
+        kb_additional_params={},
+    )
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
+        assert row.status == "parsing" and row.updated_by == "modifier"
         assert row.processing_params["custom"] == {"keep": 3}

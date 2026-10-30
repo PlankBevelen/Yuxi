@@ -1,8 +1,7 @@
 """RapidOCR 本地 ONNX 文字识别解析器。"""
 
 import os
-import tempfile
-import time
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ class RapidOCRParser(DocumentEngine):
     def __init__(self, det_box_thresh: float = 0.3):
         self.ocr: RapidOCR | None = None
         self.det_box_thresh = det_box_thresh
+        self._model_lock = threading.Lock()
 
     def process_file(self, file_path: str, output_dir: Path, params: dict[str, Any] | None = None) -> str:
         """按扩展名选择 PDF 或单图 OCR。"""
@@ -34,7 +34,7 @@ class RapidOCRParser(DocumentEngine):
 
         if file_ext == ".pdf":
             return self.process_pdf(file_path, params)
-        return self.process_image(file_path, params)
+        return self.process_image(file_path)
 
     def check_health(self) -> dict[str, Any]:
         """报告本地组件状态，避免选择器刷新时重复加载模型。"""
@@ -48,36 +48,16 @@ class RapidOCRParser(DocumentEngine):
             },
         }
 
-    def process_image(self, image: Image.Image | np.ndarray | str, params: dict[str, Any] | None = None) -> str:
-        """识别文件路径、PIL 图像或 numpy 数组中的文字。"""
+    def process_image(self, image: Image.Image | np.ndarray | str) -> str:
+        """直接识别文件或内存图像，保留输入的 RGB 颜色语义。"""
         self._load_model()
-
         try:
-            image_path = image if isinstance(image, str) else self._create_temp_image_file(image)
-            try:
-                start_time = time.time()
-                result = self.ocr(image_path)
-                processing_time = time.time() - start_time
-
-                if result.txts:
-                    source_name = os.path.basename(image_path) if isinstance(image, str) else "temp_image"
-                    logger.info(f"RapidOCR 成功: {source_name} ({processing_time:.2f}s)")
-                    return "\n".join(result.txts)
-
-                logger.warning(f"RapidOCR 未识别到文本: {image_path}")
-                return ""
-
-            finally:
-                if not isinstance(image, str) and os.path.exists(image_path):
-                    try:
-                        os.remove(image_path)
-                    except Exception as e:
-                        logger.warning(f"临时文件清理失败: {image_path} - {e}")
-
-        except Exception as e:
-            error_msg = f"图像OCR处理失败: {str(e)}"
-            logger.error(error_msg)
-            raise OCRException(error_msg, self.get_service_name(), "processing_failed") from e
+            # 旧数组经 PNG 作为 RGB 读取；PIL 输入让依赖继续执行相同颜色转换。
+            source = Image.fromarray(image) if isinstance(image, np.ndarray) else image
+            result = self.ocr(source)
+            return "\n".join(result.txts) if result.txts else ""
+        except Exception as exc:
+            raise OCRException(f"图像OCR处理失败: {exc}", self.get_service_name(), "processing_failed") from exc
 
     def process_pdf(self, pdf_path: str, params: dict[str, Any] | None = None) -> str:
         """逐页渲染并 OCR，原生资源在锁内释放后再消费复制图像。"""
@@ -161,31 +141,11 @@ class RapidOCRParser(DocumentEngine):
         }
 
     def _load_model(self) -> None:
-        """延迟加载 OCR 模型。"""
-        if self.ocr is not None:
-            return
-
-        logger.info("加载 RapidOCR 模型...")
-        try:
-            self.ocr = RapidOCR(params=self._get_model_params())
-            logger.info(f"RapidOCR PP-OCRv6 模型加载成功 (det_box_thresh={self.det_box_thresh})")
-        except Exception as e:
-            raise OCRException(f"RapidOCR模型加载失败: {str(e)}", self.get_service_name(), "load_failed") from e
-
-    def _create_temp_image_file(self, image: Image.Image | np.ndarray) -> str:
-        """把内存图像保存为临时 PNG 并返回路径。"""
-        try:
-            with tempfile.NamedTemporaryFile(mode="wb", suffix=".png", delete=False) as tmp_file:
-                temp_path = tmp_file.name
-
-                if isinstance(image, Image.Image):
-                    image.save(temp_path)
-                elif isinstance(image, np.ndarray):
-                    Image.fromarray(image).save(temp_path)
-                else:
-                    raise ValueError("不支持的图像类型,必须是 PIL.Image 或 numpy.ndarray")
-
-                return temp_path
-
-        except Exception as e:
-            raise OCRException(f"临时图像文件创建失败: {str(e)}", self.get_service_name(), "temp_file_error") from e
+        """同一实例的首次初始化串行执行，失败后允许下一次重试。"""
+        with self._model_lock:
+            if self.ocr is not None:
+                return
+            try:
+                self.ocr = RapidOCR(params=self._get_model_params())
+            except Exception as exc:
+                raise OCRException(f"RapidOCR模型加载失败: {exc}", self.get_service_name(), "load_failed") from exc

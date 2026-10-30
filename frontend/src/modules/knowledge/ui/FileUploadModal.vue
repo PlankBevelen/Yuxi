@@ -68,6 +68,7 @@
             <div class="setting-label">OCR 引擎（仅应用于 PDF/图片文件）</div>
             <div class="setting-content">
               <OCRSelector
+                v-if="visible"
                 v-model="processingParams.ocr_engine"
                 :disabled="chunkLoading"
                 @change="ocrEngineTouched = true"
@@ -251,7 +252,6 @@
 import { ref, computed, onMounted, watch, h } from 'vue'
 import { message, Upload } from 'ant-design-vue'
 import { useUserStore } from '@/modules/identity'
-import { useConfigStore } from '@/modules/settings'
 import { useKnowledgeBaseStore } from '@/modules/knowledge/model/knowledgeBase'
 import { fileApi } from '@/apis/knowledge_api'
 import {
@@ -304,9 +304,6 @@ const props = defineProps({
 const emit = defineEmits(['update:visible', 'success'])
 
 const store = useKnowledgeBaseStore()
-const configStore = useConfigStore()
-const DEFAULT_OCR_ENGINE = 'rapid_ocr'
-const defaultOcrEngine = ref(DEFAULT_OCR_ENGINE)
 
 // 文件夹选择相关
 const selectedFolderId = ref(null)
@@ -333,7 +330,8 @@ watch(
   (newVal) => {
     if (newVal) {
       ocrEngineTouched.value = false
-      applyDefaultOcrEngine()
+      ocrEngineOptions.value = []
+      processingParams.value.ocr_engine = ''
       selectedFolderId.value = props.currentFolderId
       isFolderUpload.value = props.isFolderMode
       uploadMode.value = props.mode || (props.isFolderMode ? 'folder' : 'file')
@@ -604,7 +602,7 @@ const ocrEngineTouched = ref(false)
 
 // 解析参数
 const processingParams = ref({
-  ocr_engine: DEFAULT_OCR_ENGINE
+  ocr_engine: ''
 })
 
 // 自动入库相关
@@ -682,33 +680,17 @@ const handleOcrOptionsLoaded = (data) => {
   ocrEngineOptions.value = engines
     .filter((engine) => engine.engine_id !== 'disable')
     .map((engine) => ({ value: engine.engine_id }))
-  defaultOcrEngine.value = data?.default_engine || DEFAULT_OCR_ENGINE
-  if (!ocrEngineTouched.value) applyDefaultOcrEngine()
-}
-
-const resolveDefaultOcrEngine = () => {
-  const configuredEngine = String(
-    configStore.config?.default_ocr_engine || defaultOcrEngine.value || DEFAULT_OCR_ENGINE
-  ).trim()
-  if (configuredEngine === 'disable') return configuredEngine
-  return ocrEngineOptions.value.some((option) => option.value === configuredEngine)
-    ? configuredEngine
-    : DEFAULT_OCR_ENGINE
-}
-
-const applyDefaultOcrEngine = () => {
-  processingParams.value.ocr_engine = resolveDefaultOcrEngine()
-}
-
-watch(
-  () => configStore.config?.default_ocr_engine,
-  () => {
-    if (props.visible && !ocrEngineTouched.value) applyDefaultOcrEngine()
+  if (!ocrEngineTouched.value) {
+    processingParams.value.ocr_engine = data?.default_engine || ''
   }
-)
+}
 
-// 验证OCR服务可用性
-const validateOcrService = () => {
+// 选择必须来自服务端目录；不把选项存在解释为服务健康。
+const validateOcrSelection = () => {
+  if (!processingParams.value.ocr_engine) {
+    message.error('OCR 引擎选项尚未加载，请稍后重试')
+    return false
+  }
   if (!isOcrEnabled.value) {
     return true
   }
@@ -777,8 +759,8 @@ const chunkData = async () => {
     return
   }
 
-  // 验证OCR服务可用性（非 URL 模式下）
-  if (uploadMode.value !== 'url' && !validateOcrService()) {
+  // 选择必须来自服务端目录；不把选项存在解释为服务健康。（非 URL 模式下）
+  if (uploadMode.value !== 'url' && !validateOcrSelection()) {
     return
   }
 

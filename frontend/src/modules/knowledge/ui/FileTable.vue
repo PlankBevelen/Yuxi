@@ -56,6 +56,8 @@
           <div class="setting-label">OCR 引擎（仅应用于 PDF/图片文件）</div>
           <div class="setting-content">
             <OCRSelector
+              v-if="parseConfigModalVisible"
+              @change="ocrEngineTouched = true"
               v-model="parseParams.ocr_engine"
               :disabled="parseConfigModalLoading"
               @options-loaded="handleOcrOptionsLoaded"
@@ -591,7 +593,6 @@ import { ref, computed, h, watch } from 'vue'
 import { useKnowledgeBaseStore } from '@/modules/knowledge/model/knowledgeBase'
 import { useBackgroundJobsStore } from '@/modules/background-jobs'
 import { useUserStore } from '@/modules/identity'
-import { useConfigStore } from '@/modules/settings'
 import OCRSelector from '@/modules/settings/ui/OCRSelector.vue'
 import { message, Modal } from 'ant-design-vue'
 import { documentApi, graphBuildApi } from '@/apis/knowledge_api'
@@ -1093,8 +1094,6 @@ const indexConfigModalLoading = computed(() => store.state.chunkLoading)
 const indexConfigModalTitle = ref('入库参数配置')
 
 // 解析/批量解析/重试解析参数配置相关
-const DEFAULT_OCR_ENGINE = 'rapid_ocr'
-const configStore = useConfigStore()
 
 const parseConfigModalVisible = ref(false)
 const parseConfigModalLoading = computed(() => store.state.chunkLoading || documentReparseSubmitting.value)
@@ -1103,32 +1102,26 @@ const currentParseFileIds = ref([])
 const isBatchParseOperation = ref(false)
 const isPendingParseOperation = ref(false)
 const pendingParseTotal = ref(0)
-const defaultOcrEngine = ref(DEFAULT_OCR_ENGINE)
+const ocrEngineTouched = ref(false)
 
-const resolveDefaultOcrEngine = () => {
-  return configStore.config?.default_ocr_engine || defaultOcrEngine.value || DEFAULT_OCR_ENGINE
-}
-
-const parseParams = ref({
-  ocr_engine: resolveDefaultOcrEngine()
-})
+const parseParams = ref({ ocr_engine: '' })
 
 const pendingParseTotalText = computed(() =>
   Number(pendingParseTotal.value || 0).toLocaleString('zh-CN')
 )
 
 const handleOcrOptionsLoaded = (data) => {
-  defaultOcrEngine.value = data?.default_engine || DEFAULT_OCR_ENGINE
-  if (!parseParams.value.ocr_engine) {
-    parseParams.value.ocr_engine = resolveDefaultOcrEngine()
+  if (!ocrEngineTouched.value) {
+    parseParams.value.ocr_engine = data?.default_engine || ''
   }
 }
 
 const resetParseParams = (processingParams = null) => {
+  ocrEngineTouched.value = Boolean(processingParams?.ocr_engine)
   if (processingParams?.ocr_engine) {
     parseParams.value = { ocr_engine: processingParams.ocr_engine }
   } else {
-    parseParams.value = { ocr_engine: resolveDefaultOcrEngine() }
+    parseParams.value = { ocr_engine: '' }
   }
 }
 
@@ -1471,6 +1464,10 @@ const handleParseFile = async (record) => {
 }
 
 const handleParseConfigConfirm = async () => {
+  if (!parseParams.value.ocr_engine) {
+    message.error('OCR 引擎选项尚未加载，请稍后重试')
+    return
+  }
   try {
     const params = { ocr_engine: parseParams.value.ocr_engine }
     if (documentReparseTarget.value) {

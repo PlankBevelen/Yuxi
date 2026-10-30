@@ -28,9 +28,9 @@ class MinerUOfficialParser(DocumentEngine):
     def __init__(self, api_key: str | None = None, api_base: str | None = None, model_version: str = "pipeline"):
         """使用配置凭据与默认模型初始化，单次解析参数优先。"""
 
-        self.api_key = api_key or os.getenv("MINERU_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
-            raise DocumentParserException("MINERU_API_KEY 环境变量未设置", "mineru_official", "missing_api_key")
+            raise DocumentParserException("MinerU API Key 未配置", "mineru_official", "missing_api_key")
 
         self.api_base = (api_base or "https://mineru.net/api/v4").rstrip("/")
         self.model_version = model_version

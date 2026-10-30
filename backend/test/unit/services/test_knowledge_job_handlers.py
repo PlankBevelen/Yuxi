@@ -46,8 +46,8 @@ class JobContext:
 @pytest.mark.parametrize("action", ["parse", "index"])
 @pytest.mark.parametrize("scope", ["files", "pending"])
 @pytest.mark.parametrize("params", [{}, {"chunk_preset_id": "general", "chunk_parser_config": {"size": 123}}])
-async def test_document_action_preserves_arguments_owner_and_update_order(monkeypatch, action, scope, params):
-    """更新与执行接收原参数，解析不会误收索引专用 params。"""
+async def test_document_action_preserves_arguments_owner_and_input_order(monkeypatch, action, scope, params):
+    """解析与索引执行接收原参数及归属，并保持输入顺序。"""
     payload = {
         "kb_id": "kb",
         "operator_id": "operator",
@@ -61,16 +61,10 @@ async def test_document_action_preserves_arguments_owner_and_update_order(monkey
     context = JobContext(payload)
     trace = []
 
-    async def update(kb_id, file_id, received_params, *, operator_id):
-        """锁定更新的资源、参数和操作者。"""
-        assert (kb_id, operator_id, received_params) == ("kb", "operator", params)
-        trace.append(("update", file_id))
-
     async def process(kb_id, file_id, **kwargs):
         """锁定动作边界收到的 attempt 身份及参数。"""
         expected = {"operator_id": "operator", "processing_job_id": context.job_id, "processing_owner": context.worker_id}
-        if action == "index":
-            expected["params"] = params
+        expected["params"] = params
         assert kb_id == "kb" and kwargs == expected
         trace.append((action, file_id))
         return {"file_id": file_id, "status": "parsed" if action == "parse" else "indexed"}
@@ -80,11 +74,10 @@ async def test_document_action_preserves_arguments_owner_and_update_order(monkey
         assert (kb_id, statuses, limit) == ("kb", ["uploaded"], 500)
         return ["a", "b"] if after_file_id is None else []
 
-    monkeypatch.setattr(jobs.knowledge_base, "update_file_params", update)
     monkeypatch.setattr(jobs.knowledge_base, f"{action}_file", process)
     monkeypatch.setattr(jobs.knowledge_base, "list_document_file_ids_by_statuses", pending)
     result = await getattr(jobs, f"run_knowledge_{action}")(context)
-    assert trace == ([("update", "a"), (action, "a"), ("update", "b"), (action, "b")] if params else [(action, "a"), (action, "b")])
+    assert trace == [(action, "a"), (action, "b")]
     assert result == context.result and result["succeeded"] == 2
     assert payload == original
 
@@ -186,11 +179,6 @@ async def test_ingest_preserves_global_stages_owner_and_input_result_order(monke
             raise TimeoutError("parse timeout")
         return {"file_id": file_id, "status": "parsed", "error": None}
 
-    async def update(kb_id, file_id, params, *, operator_id):
-        """索引参数只保留非空的索引配置。"""
-        assert (kb_id, operator_id, params) == ("kb", "operator", {"chunk_preset_id": "general"})
-        trace.append(("update", file_id))
-
     async def index(kb_id, file_id, **kwargs):
         """记录解析阶段完全结束后才开始的索引动作。"""
         assert kb_id == "kb" and kwargs == {
@@ -204,13 +192,13 @@ async def test_ingest_preserves_global_stages_owner_and_input_result_order(monke
             raise RuntimeError("index failure")
         return {"file_id": file_id, "status": "indexed", "error": None}
 
-    for name, fn in (("parse_file", parse), ("update_file_params", update), ("index_file", index)):
+    for name, fn in (("parse_file", parse), ("index_file", index)):
         monkeypatch.setattr(jobs.knowledge_base, name, fn)
     with pytest.raises(RuntimeError, match=f"失败 {2 if auto_index else 1} 个"):
         await jobs.run_knowledge_ingest(context)
     expected = [("parse", item) for item in items]
     if auto_index:
-        expected += [(stage, item) for item in ["ok-a", "index-bad", "ok-b"] for stage in ["update", "index"]]
+        expected += [("index", item) for item in ["ok-a", "index-bad", "ok-b"]]
     assert trace == expected
     result = context.result
     assert result["submitted"] == result["processed"] == 4
@@ -255,11 +243,6 @@ async def test_ingest_preserves_cancellation_at_each_stage(monkeypatch, stage, s
             raise cancellation
         return {"file_id": file_id, "status": "parsed"}
 
-    async def update(_kb_id, file_id, params, **_kwargs):
-        """即使索引参数为空也必须在索引前更新。"""
-        assert params == {}
-        trace.append(("update", file_id))
-
     async def index(_kb_id, file_id, **_kwargs):
         """在索引动作中恢复取消。"""
         trace.append(("index", file_id))
@@ -267,7 +250,7 @@ async def test_ingest_preserves_cancellation_at_each_stage(monkeypatch, stage, s
             raise cancellation
         return {"file_id": file_id, "status": "indexed"}
 
-    for name, fn in (("parse_file", parse), ("update_file_params", update), ("index_file", index)):
+    for name, fn in (("parse_file", parse), ("index_file", index)):
         monkeypatch.setattr(jobs.knowledge_base, name, fn)
     with pytest.raises(asyncio.CancelledError) as error:
         await jobs.run_knowledge_ingest(context)
@@ -277,8 +260,6 @@ async def test_ingest_preserves_cancellation_at_each_stage(monkeypatch, stage, s
     if stage == "index":
         expected += [("parse", "a"), ("parse", "b")]
     if source == "action":
-        if stage == "index":
-            expected.append(("update", "a"))
         expected.append((stage, "a"))
     assert trace == expected
 
@@ -311,16 +292,12 @@ async def test_failure_logs_interpolate_identifiers_without_paths_or_exception_s
         """恢复索引异常。"""
         raise RuntimeError("secret-exception-content")
 
-    async def update(*_args, **_kwargs):
-        """隔离参数持久化以聚焦实际日志结果。"""
-
     async def pending(*_args, after_file_id, **_kwargs):
         """提供一次待处理输入。"""
         return [] if after_file_id else ["file"]
 
     for name, fn in (
         ("parse_file", parse),
-        ("update_file_params", update),
         ("index_file", index),
         ("list_document_file_ids_by_statuses", pending),
     ):
@@ -370,8 +347,8 @@ if jobs:
     ("action", "scope"),
     [("parse", "files"), ("index", "files"), ("parse", "pending"), ("index", "pending"), ("index", "ingest")],
 )
-async def test_parameter_failure_skips_that_action_and_continues_with_later_files(monkeypatch, action, scope):
-    """更新失败不执行该文件动作，后续文件完成且先保存部分结果再抛错。"""
+async def test_parameter_claim_failure_continues_with_later_files(monkeypatch, action, scope):
+    """动作内的参数领取失败仍保留部分结果，并继续处理后续文件。"""
     context = JobContext(
         {
             "kb_id": "kb",
@@ -389,20 +366,18 @@ async def test_parameter_failure_skips_that_action_and_continues_with_later_file
     )
     trace = []
 
-    async def update(_kb_id, file_id, _params, **_kwargs):
-        """使第一项在动作开始前失败。"""
-        trace.append(("update", file_id))
-        if file_id == "bad":
-            raise RuntimeError("private parameter failure")
-
     async def parse(_kb_id, file_id, **_kwargs):
-        """执行解析并保留外部动作顺序。"""
+        """由解析入口报告参数领取失败。"""
         trace.append(("parse", file_id))
+        if action == "parse" and file_id == "bad":
+            raise ValueError("private parameter failure")
         return {"file_id": file_id, "status": "parsed"}
 
     async def index(_kb_id, file_id, **_kwargs):
-        """只有参数更新成功的项可以开始索引。"""
+        """由索引入口报告参数领取失败。"""
         trace.append(("index", file_id))
+        if file_id == "bad":
+            raise ValueError("private parameter failure")
         return {"file_id": file_id, "status": "indexed"}
 
     async def pending(*_args, after_file_id, **_kwargs):
@@ -412,7 +387,6 @@ async def test_parameter_failure_skips_that_action_and_continues_with_later_file
     for name, fn in (
         ("parse_file", parse),
         ("index_file", index),
-        ("update_file_params", update),
         ("list_document_file_ids_by_statuses", pending),
     ):
         monkeypatch.setattr(jobs.knowledge_base, name, fn)
@@ -420,7 +394,7 @@ async def test_parameter_failure_skips_that_action_and_continues_with_later_file
     with pytest.raises(RuntimeError, match="失败 1 个"):
         await handler(context)
     prefix = [("parse", "bad"), ("parse", "ok")] if scope == "ingest" else []
-    assert trace == prefix + [("update", "bad"), ("update", "ok"), (action, "ok")]
+    assert trace == prefix + [(action, "bad"), (action, "ok")]
     assert context.result["processed"] == 2 and context.result["failed"] == context.result["succeeded"] == 1
     assert context.result["items"][0]["status"] == "failed"
     assert context.result["items"][1] == {"file_id": "ok", "status": "parsed" if action == "parse" else "indexed"}

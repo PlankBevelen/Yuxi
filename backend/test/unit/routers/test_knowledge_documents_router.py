@@ -358,7 +358,7 @@ async def test_reconcile_graph_build_mutates_state_only_after_unique_job_is_crea
 
 
 async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypatch):
-    captured = {"list_calls": [], "updated": [], "indexed": []}
+    captured = {"list_calls": [], "indexed": []}
 
     async def fake_ensure_knowledge_base_supports_documents(kb_id: str, operation: str) -> dict:
         captured["ensure"] = (kb_id, operation)
@@ -370,9 +370,6 @@ async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypa
     async def fake_list_document_file_ids_by_statuses(kb_id: str, *, statuses, after_file_id, limit):
         captured["list_calls"].append({"kb_id": kb_id, "statuses": statuses, "after_file_id": after_file_id, "limit": limit})
         return ["file_1", "file_2"] if after_file_id is None else []
-
-    async def fake_update_file_params(kb_id: str, file_id: str, params: dict, operator_id: str | None = None):
-        captured["updated"].append({"kb_id": kb_id, "file_id": file_id, "params": params, "operator_id": operator_id})
 
     async def fake_index_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None, **_kwargs):
         captured["indexed"].append({"kb_id": kb_id, "file_id": file_id, "operator_id": operator_id, "params": params})
@@ -395,7 +392,6 @@ async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypa
         "list_document_file_ids_by_statuses",
         fake_list_document_file_ids_by_statuses,
     )
-    monkeypatch.setattr(knowledge_router.knowledge_base_manager, "update_file_params", fake_update_file_params)
     monkeypatch.setattr(knowledge_router.knowledge_base_manager, "index_file", fake_index_file)
     _patch_submit_job(monkeypatch, fake_enqueue_unique_by_payload)
 
@@ -412,10 +408,6 @@ async def test_index_pending_documents_uses_pending_statuses_and_params(monkeypa
     assert captured["payload"]["statuses"] == document_actions.PENDING_INDEX_STATUSES
     assert captured["payload"]["params"] == params
     assert captured["list_calls"][0]["statuses"] == document_actions.PENDING_INDEX_STATUSES
-    assert captured["updated"] == [
-        {"kb_id": "kb_1", "file_id": "file_1", "params": params, "operator_id": "uid-user"},
-        {"kb_id": "kb_1", "file_id": "file_2", "params": params, "operator_id": "uid-user"},
-    ]
     assert captured["indexed"] == [
         {"kb_id": "kb_1", "file_id": "file_1", "operator_id": "uid-user", "params": params},
         {"kb_id": "kb_1", "file_id": "file_2", "operator_id": "uid-user", "params": params},
@@ -464,8 +456,8 @@ async def test_add_uploaded_documents_rejects_invalid_payload(monkeypatch, paylo
 
 
 async def test_parse_documents_accepts_payload_with_params(monkeypatch):
-    """parse_documents 支持传入包含 params 的对象并更新文件参数。"""
-    captured = {"updated": [], "parsed": []}
+    """parse_documents 支持传入包含 params 的对象并将参数交给解析入口。"""
+    captured = {"parsed": []}
 
     async def fake_ensure_knowledge_base_supports_documents(kb_id: str, operation: str) -> KnowledgeBaseDetail:
         return _database_detail()
@@ -473,11 +465,8 @@ async def test_parse_documents_accepts_payload_with_params(monkeypatch):
     async def fake_get_knowledge_base_info(kb_id: str) -> KnowledgeBaseDetail:
         return _database_detail()
 
-    async def fake_update_file_params(kb_id: str, file_id: str, params: dict, operator_id: str | None = None):
-        captured["updated"].append({"kb_id": kb_id, "file_id": file_id, "params": params, "operator_id": operator_id})
-
-    async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None, **_kwargs):
-        captured["parsed"].append({"kb_id": kb_id, "file_id": file_id, "operator_id": operator_id})
+    async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None, **_kwargs):
+        captured["parsed"].append({"kb_id": kb_id, "file_id": file_id, "operator_id": operator_id, "params": params})
         return {"file_id": file_id, "status": "parsed"}
 
     async def fake_enqueue(name: str, job_type: str, payload: dict):
@@ -491,7 +480,6 @@ async def test_parse_documents_accepts_payload_with_params(monkeypatch):
         fake_ensure_knowledge_base_supports_documents,
     )
     monkeypatch.setattr(knowledge_router.knowledge_base_manager, "get_knowledge_base_info", fake_get_knowledge_base_info)
-    monkeypatch.setattr(knowledge_router.knowledge_base_manager, "update_file_params", fake_update_file_params)
     monkeypatch.setattr(knowledge_router.knowledge_base_manager, "parse_file", fake_parse_file)
     _patch_submit_job(monkeypatch, fake_enqueue)
 
@@ -504,13 +492,12 @@ async def test_parse_documents_accepts_payload_with_params(monkeypatch):
 
     assert result["status"] == "queued"
     assert captured["payload"]["params"] == params
-    assert captured["updated"] == [{"kb_id": "kb_1", "file_id": "file_1", "params": params, "operator_id": "uid-user"}]
-    assert captured["parsed"] == [{"kb_id": "kb_1", "file_id": "file_1", "operator_id": "uid-user"}]
+    assert captured["parsed"] == [{"kb_id": "kb_1", "file_id": "file_1", "operator_id": "uid-user", "params": params}]
 
 
 async def test_parse_pending_documents_uses_params(monkeypatch):
-    """parse_pending_documents 支持接收 params 并在执行中应用更新。"""
-    captured = {"updated": [], "parsed": []}
+    """parse_pending_documents 支持接收 params 并传给单文件解析入口。"""
+    captured = {"parsed": []}
 
     async def fake_ensure_knowledge_base_supports_documents(kb_id: str, operation: str) -> KnowledgeBaseDetail:
         return _database_detail(pending_parse_count=1)
@@ -521,11 +508,8 @@ async def test_parse_pending_documents_uses_params(monkeypatch):
     async def fake_list_document_file_ids_by_statuses(kb_id: str, *, statuses, after_file_id, limit):
         return ["file_pending_1"] if after_file_id is None else []
 
-    async def fake_update_file_params(kb_id: str, file_id: str, params: dict, operator_id: str | None = None):
-        captured["updated"].append({"kb_id": kb_id, "file_id": file_id, "params": params, "operator_id": operator_id})
-
-    async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None, **_kwargs):
-        captured["parsed"].append({"kb_id": kb_id, "file_id": file_id, "operator_id": operator_id})
+    async def fake_parse_file(kb_id: str, file_id: str, operator_id: str | None = None, params: dict | None = None, **_kwargs):
+        captured["parsed"].append({"kb_id": kb_id, "file_id": file_id, "operator_id": operator_id, "params": params})
         return {"file_id": file_id, "status": "parsed"}
 
     async def fake_enqueue_unique_by_payload(**kwargs):
@@ -544,7 +528,6 @@ async def test_parse_pending_documents_uses_params(monkeypatch):
         "list_document_file_ids_by_statuses",
         fake_list_document_file_ids_by_statuses,
     )
-    monkeypatch.setattr(knowledge_router.knowledge_base_manager, "update_file_params", fake_update_file_params)
     monkeypatch.setattr(knowledge_router.knowledge_base_manager, "parse_file", fake_parse_file)
     _patch_submit_job(monkeypatch, fake_enqueue_unique_by_payload)
 
@@ -557,8 +540,7 @@ async def test_parse_pending_documents_uses_params(monkeypatch):
 
     assert result["status"] == "queued"
     assert captured["payload"]["params"] == params
-    assert captured["updated"] == [{"kb_id": "kb_1", "file_id": "file_pending_1", "params": params, "operator_id": "uid-user"}]
-    assert captured["parsed"] == [{"kb_id": "kb_1", "file_id": "file_pending_1", "operator_id": "uid-user"}]
+    assert captured["parsed"] == [{"kb_id": "kb_1", "file_id": "file_pending_1", "operator_id": "uid-user", "params": params}]
 
 
 @pytest.mark.parametrize(

@@ -109,4 +109,11 @@ paddleocr_api_opts = Option(
     },
 )
 
-DOCUMENT_OPTIONS = (mineru_ocr_host_opts, mineru_official_api_opts, pp_structure_v3_ocr_host_opts, paddleocr_api_opts)
+OCR_ENGINE_OPTIONS = {
+    "mineru_ocr": mineru_ocr_host_opts,
+    "mineru_official": mineru_official_api_opts,
+    "pp_structure_v3_ocr": pp_structure_v3_ocr_host_opts,
+    "paddleocr_vl_1_6": paddleocr_api_opts,
+    "paddleocr_pp_ocrv6": paddleocr_api_opts,
+}
+DOCUMENT_OPTIONS = tuple({option.key: option for option in OCR_ENGINE_OPTIONS.values()}.values())

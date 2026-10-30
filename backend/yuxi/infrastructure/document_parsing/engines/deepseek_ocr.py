@@ -34,9 +34,9 @@ class DeepSeekOCRParser(DocumentEngine):
     def __init__(self, api_key: str | None = None, api_url: str | None = None):
         """使用配置中心传入的 SiliconFlow 凭证和固定服务端点初始化解析器。"""
 
-        self.api_key = api_key or os.getenv("SILICONFLOW_API_KEY")
+        self.api_key = api_key
         if not self.api_key:
-            raise DocumentParserException("SILICONFLOW_API_KEY environment variable not set", "deepseek_ocr", "missing_api_key")
+            raise DocumentParserException("DeepSeek OCR API Key 未配置", "deepseek_ocr", "missing_api_key")
 
         self.api_url = api_url or "https://api.siliconflow.cn/v1/chat/completions"
         self.model = "deepseek-ai/DeepSeek-OCR"
@@ -169,7 +169,12 @@ class DeepSeekOCRParser(DocumentEngine):
             raise DocumentParserException(error_msg, self.get_service_name(), f"http_{response.status_code}")
 
         result = response.json()
-        content = result["choices"][0]["message"]["content"]
+        choice = result["choices"][0]
+        if choice.get("finish_reason") != "stop":
+            raise DocumentParserException("OCR 响应未完整结束", self.get_service_name(), "incomplete_result")
+        content = choice["message"]["content"]
+        if not isinstance(content, str):
+            raise DocumentParserException("OCR 结果正文必须是字符串", self.get_service_name(), "invalid_result")
 
         content = re.sub(r"<\|ref\|>.*?<\|/ref\|>", "", content)
         content = re.sub(r"<\|det\|>.*?<\|/det\|>", "", content)

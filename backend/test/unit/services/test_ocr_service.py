@@ -32,9 +32,9 @@ async def test_task_resolution_uses_database_option(db_session):
         "tester",
     )
 
-    resolved = await ocr_service.resolve_ocr_task_params({"ocr_engine": "mineru_ocr"}, db_session)
+    resolved = await ocr_service.resolve_parse_options({"ocr_engine": "mineru_ocr"}, db_session)
 
-    assert resolved["_ocr_processor_kwargs"] == {
+    assert resolved.processor_kwargs == {
         "server_url": "http://mineru-config:30001/",
         "backend": "hybrid-engine",
         "effort": "medium",
@@ -51,14 +51,14 @@ async def test_mineru_task_resolution_uses_saved_defaults_and_keeps_task_overrid
         "tester",
     )
 
-    resolved = await ocr_service.resolve_ocr_task_params(
+    resolved = await ocr_service.resolve_parse_options(
         {"ocr_engine": "mineru_ocr", "backend": "hybrid-engine", "effort": "medium"}, db_session
     )
 
-    assert resolved["_ocr_processor_kwargs"]["backend"] == "vlm-engine"
-    assert resolved["_ocr_processor_kwargs"]["effort"] == "high"
-    assert resolved["backend"] == "hybrid-engine"
-    assert resolved["effort"] == "medium"
+    assert resolved.processor_kwargs["backend"] == "vlm-engine"
+    assert resolved.processor_kwargs["effort"] == "high"
+    assert resolved.params["backend"] == "hybrid-engine"
+    assert resolved.params["effort"] == "medium"
 
 
 @pytest.mark.asyncio
@@ -68,10 +68,40 @@ async def test_mineru_official_resolves_model_default_with_environment_credentia
     monkeypatch.setenv("MINERU_API_KEY", "fixture-key")
     await update_option_value(db_session, "mineru_official_api_opts", saved, "tester")
 
-    resolved = await ocr_service.resolve_ocr_task_params({"ocr_engine": "mineru_official", "model_version": "pipeline"}, db_session)
+    resolved = await ocr_service.resolve_parse_options({"ocr_engine": "mineru_official", "model_version": "pipeline"}, db_session)
 
-    assert resolved["_ocr_processor_kwargs"] == {"api_key": "fixture-key", "model_version": expected}
-    assert resolved["model_version"] == "pipeline"
+    assert resolved.processor_kwargs == {"api_key": "fixture-key", "model_version": expected}
+    assert resolved.params["model_version"] == "pipeline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine_id", "environment", "field", "value"),
+    [
+        ("mineru_ocr", "MINERU_API_URI", "server_url", "http://mineru-fixture:30001"),
+        ("pp_structure_v3_ocr", "PADDLEX_URI", "server_url", "http://paddle-fixture:8080"),
+        ("mineru_official", "MINERU_API_KEY", "api_key", "fixture-key"),
+        ("paddleocr_vl_1_6", "PADDLEOCR_API_TOKEN", "api_token", "fixture-token"),
+    ],
+)
+async def test_engine_consumes_resolved_configuration(db_session, monkeypatch, engine_id, environment, field, value):
+    """配置层拥有环境读取，适配器不能在装配时重读并替换本次配置。"""
+    from importlib import import_module
+
+    monkeypatch.setenv(environment, value)
+    resolved = await ocr_service.resolve_parse_options({"ocr_engine": engine_id}, db_session)
+    assert resolved.processor_kwargs[field] == value
+    spec = ENGINE_SPECS[engine_id]
+    engine_type = getattr(import_module(spec.module_path), spec.class_name)
+    monkeypatch.setenv(environment, "unexpected-later-value")
+    assert getattr(engine_type(**resolved.processor_kwargs), field) == value
+    if engine_id == "mineru_official":
+        from yuxi.infrastructure.document_parsing import DocumentParserException
+
+        with pytest.raises(DocumentParserException, match="未配置"):
+            engine_type()
+    else:
+        assert getattr(engine_type(), field) != "unexpected-later-value"
 
 
 @pytest.mark.asyncio
@@ -85,6 +115,7 @@ async def test_ocr_options_use_parser_metadata(db_session, monkeypatch):
 
     assert options == {
         "default_engine": "rapid_ocr",
+        "option_keys": [option.key for option in ocr_service.DOCUMENT_OPTIONS],
         "engines": [
             {
                 "engine_id": engine_id,
@@ -113,9 +144,9 @@ async def test_deepseek_uses_provider_credentials_without_chat_models(db_session
     db_session.add(provider)
     await db_session.flush()
 
-    resolved = await ocr_service.resolve_ocr_task_params({"ocr_engine": "deepseek_ocr"}, db_session)
+    resolved = await ocr_service.resolve_parse_options({"ocr_engine": "deepseek_ocr"}, db_session)
 
-    assert resolved["_ocr_processor_kwargs"] == {
+    assert resolved.processor_kwargs == {
         "api_key": "provider-secret",
         "api_url": "https://provider.example/v1/chat/completions",
     }

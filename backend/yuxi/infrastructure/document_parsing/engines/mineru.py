@@ -25,7 +25,7 @@ class MinerUParser(DocumentEngine):
 
     def __init__(self, server_url: str | None = None, backend: str = "hybrid-engine", effort: str = "medium"):
         """接收服务配置作为默认值，单次解析参数优先。"""
-        self.server_url = (server_url or os.getenv("MINERU_API_URI") or "http://localhost:30001").rstrip("/")
+        self.server_url = (server_url or "http://localhost:30001").rstrip("/")
         self.parse_endpoint = f"{self.server_url}/file_parse"
         self.backend = backend
         self.effort = effort
@@ -201,9 +201,6 @@ class MinerUParser(DocumentEngine):
                 finally:
                     os.unlink(tmp_zip.name)
 
-            if not text:
-                logger.error("MinerU 未返回任何文本内容")
-                raise DocumentParserException("MinerU 未返回任何文本内容", self.get_service_name(), "no_content")
             return text
         except Exception as e:
             raise DocumentParserException(

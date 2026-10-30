@@ -37,7 +37,6 @@ from yuxi.modules.knowledge.storage.milvus import (
     get_embedding_function,
 )
 from yuxi.modules.knowledge.storage.offload import run_milvus_query_io
-from yuxi.modules.knowledge.utils.kb_utils import resolve_processing_params
 from yuxi.modules.models.providers.cache import model_cache
 from yuxi.modules.system.options import system_options
 from yuxi.shared.datetime import utc_isoformat
@@ -780,7 +779,7 @@ class MilvusKB(KnowledgeExecutor):
         processing_owner: str | None = None,
     ) -> dict:
         """索引已解析文件（状态 INDEXING → INDEXED/ERROR_INDEXING）。"""
-        file_meta = await self._load_file_meta(kb_id, file_id)
+        await self._load_file_meta(kb_id, file_id)
         # 在投影锁内先检查 PG 可见事实，删除后不能重新创建外部集合。
         collection = await self._get_or_create_milvus_collection(kb_id, embedding_model_spec)
         if not collection:
@@ -793,11 +792,6 @@ class MilvusKB(KnowledgeExecutor):
             FileStatus.ERROR_INDEXING,
             FileStatus.INDEXED,
         }
-        params = resolve_processing_params(
-            kb_additional_params=additional_params,
-            file_processing_params=file_meta.get("processing_params"),
-            request_params=params,
-        )
         file_repo = KnowledgeFileRepository()
         owner_filter = (
             {"processing_job_id": processing_job_id, "processing_owner": processing_owner}
@@ -807,7 +801,6 @@ class MilvusKB(KnowledgeExecutor):
 
         claim_data = {
             "status": FileStatus.INDEXING,
-            "processing_params": params,
             "error_message": None,
             "processing_job_id": processing_job_id,
             "processing_owner": processing_owner,
@@ -820,6 +813,8 @@ class MilvusKB(KnowledgeExecutor):
             file_id=file_id,
             allowed_statuses=allowed_statuses,
             data=claim_data,
+            processing_params=params,
+            kb_additional_params=additional_params,
         )
         if claimed_record is None:
             current_meta = await self._load_file_meta(kb_id, file_id)
@@ -830,6 +825,7 @@ class MilvusKB(KnowledgeExecutor):
             )
 
         file_meta = self.file_record_to_meta(claimed_record)
+        params = file_meta["processing_params"]
         if not file_meta.get("markdown_file"):
             reset_data = {
                 "status": FileStatus.UPLOADED,

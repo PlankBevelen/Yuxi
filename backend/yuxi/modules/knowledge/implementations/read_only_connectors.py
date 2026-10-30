@@ -37,11 +37,12 @@ class ReadOnlyConnectors(KnowledgeExecutor):
         file_id: str,
         operator_id: str | None = None,
         *,
+        params: dict | None = None,
         additional_params: dict[str, Any],
         processing_job_id: str | None = None,
         processing_owner: str | None = None,
     ) -> dict:
-        del kb_id, file_id, operator_id, additional_params, processing_job_id, processing_owner
+        del kb_id, file_id, operator_id, params, additional_params, processing_job_id, processing_owner
         raise self._readonly_error()
 
     async def index_file(
@@ -66,18 +67,6 @@ class ReadOnlyConnectors(KnowledgeExecutor):
             processing_job_id,
             processing_owner,
         )
-        raise self._readonly_error()
-
-    async def update_file_params(
-        self,
-        kb_id: str,
-        file_id: str,
-        params: dict,
-        operator_id: str | None = None,
-        *,
-        additional_params: dict[str, Any],
-    ) -> None:
-        del kb_id, file_id, params, operator_id, additional_params
         raise self._readonly_error()
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:

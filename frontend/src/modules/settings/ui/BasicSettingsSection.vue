@@ -1,5 +1,5 @@
 <template>
-  <div class="basic-settings-section settings-page">
+  <a-spin wrapper-class-name="basic-settings-section settings-page" :spinning="saving" tip="保存中…">
     <template v-if="userStore.isSuperAdmin">
       <section class="settings-section-block">
         <h3 class="settings-section-title">默认项配置</h3>
@@ -101,6 +101,7 @@
                 id="max-cooperation-depth"
                 aria-describedby="cooperation-depth-help"
                 :value="configStore.config?.max_cooperation_depth ?? 2"
+                :disabled="saving"
                 :min="0"
                 :precision="0"
                 @change="handleCooperationDepthChange"
@@ -119,6 +120,7 @@
                 id="max-cooperation-concurrency"
                 aria-describedby="cooperation-concurrency-help"
                 :value="configStore.config?.max_cooperation_concurrency ?? 4"
+                :disabled="saving"
                 :min="1"
                 :precision="0"
                 @change="handleCooperationConcurrencyChange"
@@ -130,11 +132,12 @@
 
       <SkillSettingsSection />
     </template>
-  </div>
+  </a-spin>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { message } from 'ant-design-vue'
+import { computed, ref } from 'vue'
 import { useConfigStore } from '@/modules/settings/model/config'
 import {
   COOPERATION_CONCURRENCY_KEY,
@@ -151,8 +154,17 @@ import SkillSettingsSection from '@/modules/agents/ui/SkillSettingsSection.vue'
 const configStore = useConfigStore()
 const userStore = useUserStore()
 const items = computed(() => configStore.config?._config_items || {})
-const handleChange = (key, e) => {
-  configStore.setConfigValue(key, e)
+const saving = ref(false)
+const handleChange = async (key, value) => {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await configStore.setConfigValue(key, value)
+  } catch (error) {
+    message.error(error.message || '保存设置失败')
+  } finally {
+    saving.value = false
+  }
 }
 
 /** 只提交完整的非负整数，清空输入不会修改已保存的限制。 */
@@ -167,13 +179,13 @@ const handleCooperationConcurrencyChange = (value) => {
 
 const handleChatModelSelect = (spec) => {
   if (typeof spec === 'string' && spec) {
-    configStore.setConfigValue('default_model', spec)
+    handleChange('default_model', spec)
   }
 }
 
 const handleFastModelSelect = (spec) => {
   if (typeof spec === 'string' && spec) {
-    configStore.setConfigValue('fast_model', spec)
+    handleChange('fast_model', spec)
   }
 }
 </script>

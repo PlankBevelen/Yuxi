@@ -33,8 +33,8 @@ class PaddleOCRAPIParser(DocumentEngine):
     default_optional_payload: dict[str, bool] = {}
 
     def __init__(self, api_token: str | None = None, api_url: str | None = None):
-        self.api_token = api_token or os.getenv("PADDLEOCR_API_TOKEN")
-        self.api_url = (api_url or os.getenv("PADDLEOCR_API_URL") or DEFAULT_PADDLEOCR_API_URL).rstrip("/")
+        self.api_token = api_token
+        self.api_url = (api_url or DEFAULT_PADDLEOCR_API_URL).rstrip("/")
 
     def check_health(self) -> dict[str, Any]:
         """只报告 token 配置状态，不创建真实任务。"""
@@ -73,7 +73,7 @@ class PaddleOCRAPIParser(DocumentEngine):
                 max_wait_seconds=float(params.get("max_wait_seconds") or 600),
             )
             rows = self._download_jsonl(result_url)
-            text = self._extract_markdown(rows, output_dir, params)
+            text = self._extract_markdown(rows, output_dir)
 
             processing_time = time.time() - start_time
             logger.info(f"PaddleOCR API 处理成功: {Path(file_path).name} ({self.model}) - {len(text)} 字符 ({processing_time:.2f}s)")
@@ -210,7 +210,7 @@ class PaddleOCRAPIParser(DocumentEngine):
 
         return rows
 
-    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path, params: dict[str, Any]) -> str:
+    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path) -> str:
         raise NotImplementedError
 
     def _download_markdown_image(self, image_url: str, output_dir: Path) -> str:
@@ -238,16 +238,18 @@ class PaddleOCRVLParser(PaddleOCRAPIParser):
         "useChartRecognition": False,
     }
 
-    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path, params: dict[str, Any]) -> str:
+    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path) -> str:
         markdown_parts: list[str] = []
 
         for row in rows:
-            result = row.get("result") or {}
-            for item in result.get("layoutParsingResults") or []:
-                markdown = item.get("markdown") or {}
-                text = markdown.get("text")
+            items = row["result"]["layoutParsingResults"]
+            if not isinstance(items, list):
+                raise ValueError("layoutParsingResults 必须是列表")
+            for item in items:
+                markdown = item["markdown"]
+                text = markdown["text"]
                 if not isinstance(text, str):
-                    continue
+                    raise ValueError("Markdown 正文必须是字符串")
 
                 mapping = {}
                 for image_path, image_url in (markdown.get("images") or {}).items():
@@ -275,16 +277,19 @@ class PaddleOCRPPOCRv6Parser(PaddleOCRAPIParser):
         "useTextlineOrientation": False,
     }
 
-    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path, params: dict[str, Any]) -> str:
+    def _extract_markdown(self, rows: list[dict[str, Any]], output_dir: Path) -> str:
         lines: list[str] = []
 
         for row in rows:
-            result = row.get("result") or {}
-            for item in result.get("ocrResults") or []:
-                pruned_result = item.get("prunedResult") or {}
-                rec_texts = pruned_result.get("rec_texts") or []
+            items = row["result"]["ocrResults"]
+            if not isinstance(items, list):
+                raise ValueError("ocrResults 必须是列表")
+            for item in items:
+                rec_texts = item["prunedResult"]["rec_texts"]
+                if not isinstance(rec_texts, list) or any(not isinstance(text, str) for text in rec_texts):
+                    raise ValueError("rec_texts 必须是字符串列表")
                 for text in rec_texts:
-                    if isinstance(text, str) and text.strip():
+                    if text.strip():
                         lines.append(text.strip())
 
         return "\n".join(lines).strip()

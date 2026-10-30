@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from datetime import timedelta
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from yuxi.modules.knowledge.repositories.bases import KnowledgeBaseRepository
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 from yuxi.modules.knowledge.repositories.graphs import KnowledgeGraphRepository
 from yuxi.modules.knowledge.services import projection_cleanup
+from yuxi.shared.datetime import utc_now
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
 
@@ -87,6 +89,143 @@ async def _file():
     return await KnowledgeFileRepository().upsert(
         "file-test", {"kb_id": "kb-test", "filename": "test.md", "status": "indexing", "markdown_file": "document.md"}
     )
+
+
+async def _running_job(database, job_id, owner):
+    """建立真实执行资格，测试只改变自己的作业记录。"""
+    async with database() as session, session.begin():
+        session.add(
+            BackgroundJobRecord(
+                id=job_id,
+                name="OCR fixture",
+                type="knowledge_parse",
+                status="running",
+                worker_id=owner,
+                lease_expires_at=utc_now() + timedelta(minutes=1),
+            )
+        )
+
+
+async def test_competing_parse_cannot_overwrite_winner_parameters(database, monkeypatch, tmp_path):
+    """真实 worker 用例竞争文件，落败请求不能改变胜出产物的参数事实。"""
+    from yuxi.modules.knowledge.services import background_jobs as jobs
+
+    repo = KnowledgeFileRepository()
+    await repo.upsert("file-test", {"kb_id": "kb-test", "filename": "scan.pdf", "path": "minio://fixture/scan.pdf", "status": "uploaded"})
+    await _running_job(database, "parse-a", "worker-a")
+    await _running_job(database, "parse-b", "worker-b")
+    executor = object.__new__(MilvusKB)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def parse_source(*, params, **kwargs):
+        """固定胜出任务已读参数的时点，外部 OCR 不参与事务竞争。"""
+        selected = params["ocr_engine"]
+        entered.set()
+        await release.wait()
+        return selected
+
+    async def save(kb_id, file_id, attempt_id, content):
+        """以实际文件字节观察已发布的解析结果。"""
+        (tmp_path / "document.md").write_text(content)
+        return "minio://fixture/result/document.md"
+
+    monkeypatch.setattr(
+        jobs.knowledge_base, "get_kb_config", AsyncMock(return_value=SimpleNamespace(kb_type="milvus", additional_params={}))
+    )
+    monkeypatch.setattr(jobs.knowledge_base, "_get_or_create_kb_instance", AsyncMock(return_value=executor))
+    monkeypatch.setattr("yuxi.modules.documents.service.parse_to_hosted_markdown", parse_source)
+    monkeypatch.setattr("yuxi.modules.knowledge.base.get_minio_client", lambda: SimpleNamespace(KB_BUCKETS={"images": "images"}))
+    monkeypatch.setattr(executor, "save_markdown_artifact", save)
+
+    async def process(job_id, worker_id, engine):
+        """从正式单文件 worker 用例执行到真实数据库发布。"""
+        return await jobs._process_document_file(
+            SimpleNamespace(job_id=job_id, worker_id=worker_id),
+            kb_id="kb-test",
+            file_id="file-test",
+            action="parse",
+            params={"ocr_engine": engine},
+            operator_id="operator",
+        )
+
+    winner = asyncio.create_task(process("parse-a", "worker-a", "rapid_ocr"))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        loser = await process("parse-b", "worker-b", "mineru_ocr")
+        assert loser["status"] == "failed"
+        release.set()
+        assert (await asyncio.wait_for(winner, 5))["status"] == "parsed"
+        record = await repo.get_by_file_id("file-test")
+        assert record.processing_params["ocr_engine"] == (tmp_path / "document.md").read_text() == "rapid_ocr"
+        assert record.processing_owner is None
+    finally:
+        release.set()
+        await winner
+
+
+@pytest.mark.parametrize("owner", [{"processing_job_id": "job"}, {"processing_owner": "worker"}])
+@pytest.mark.parametrize("operation", ["claim", "index"])
+async def test_partial_execution_identity_cannot_modify_file(database, owner, operation):
+    """缺少作业或执行者的调用不能借无 Owner 路径修改文件。"""
+    await _file()
+    repo = KnowledgeFileRepository()
+    with pytest.raises(ValueError, match="job and worker"):
+        if operation == "claim":
+            await repo.update_fields_if_status(
+                kb_id="kb-test", file_id="file-test", allowed_statuses={"indexing"}, data={"status": "parsed"}, **owner
+            )
+        else:
+            await repo.begin_index_generation(kb_id="kb-test", file_id="file-test", **owner)
+    record = await repo.get_by_file_id("file-test")
+    assert record.status == "indexing"
+    assert record.building_generation is None
+
+
+@pytest.mark.parametrize("wait_for_file", [False, True])
+async def test_expired_index_job_cannot_activate_generation(database, wait_for_file):
+    """租约过期但尚未恢复清理时，旧 owner 也不能激活代次。"""
+    await _file()
+    repo = KnowledgeFileRepository()
+    await _running_job(database, "index-job", "worker")
+    await repo.update_fields(file_id="file-test", data={"processing_job_id": "index-job", "processing_owner": "worker"})
+    owner = {"processing_job_id": "index-job", "processing_owner": "worker"}
+    generation = await repo.begin_index_generation(kb_id="kb-test", file_id="file-test", **owner)
+    async with database() as session, session.begin():
+        job = await session.get(BackgroundJobRecord, "index-job")
+        job.lease_expires_at = utc_now() + timedelta(seconds=5 if wait_for_file else -1)
+
+    async def finish():
+        """调用真实发布事务，保留其异常。"""
+        return await repo.finish_index_generation(
+            kb_id="kb-test", file_id="file-test", generation=generation, chunk_count=2, token_count=3, **owner
+        )
+
+    if wait_for_file:
+        async with database() as blocker, blocker.begin():
+            await blocker.execute(select(KnowledgeFile).where(KnowledgeFile.file_id == "file-test").with_for_update())
+            blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            pending = asyncio.create_task(finish())
+            # 先观察真实 PostgreSQL 等锁事实，再让租约到期，排除慢调度造成的假通过。
+            async with asyncio.timeout(8), database() as observer:
+                while not await observer.scalar(
+                    text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE :pid = ANY(pg_blocking_pids(pid)))"),
+                    {"pid": blocker_pid},
+                ):
+                    await asyncio.sleep(0.01)
+                job = await observer.get(BackgroundJobRecord, "index-job")
+                database_now = await observer.scalar(select(func.clock_timestamp()))
+                assert job.lease_expires_at > database_now
+                await asyncio.sleep((job.lease_expires_at - database_now).total_seconds() + 0.05)
+        with pytest.raises(ValueError, match="owner"):
+            await pending
+    else:
+        with pytest.raises(ValueError, match="owner"):
+            await finish()
+    record = await repo.get_by_file_id("file-test")
+    assert record.active_generation == 1 and record.building_generation == generation
+    assert record.status == "indexing" and record.chunk_count == 0
+    async with database() as session:
+        assert await session.scalar(select(func.count()).select_from(KnowledgeProjectionOutbox)) == 0
 
 
 async def test_new_generation_isolates_old_tail_and_cleanup_bounds_generation_retention(database, monkeypatch):
@@ -153,10 +292,11 @@ async def test_deleted_knowledge_base_rejects_activation_and_new_files(database)
     assert await KnowledgeBaseRepository().get_by_kb_id("kb-test") is None
 
 
-async def test_file_owner_is_independent_of_job_tracker_and_rejects_replaced_callback(database):
-    """文件自身验证当前处理身份，不依赖 JobTracker 的恢复或租约记录。"""
+async def test_file_owner_rejects_replaced_callback_even_with_live_job(database):
+    """有效 Job 也不能越过已被替换的文件执行身份。"""
     await _file()
     repo = KnowledgeFileRepository()
+    await _running_job(database, "progress-old", "old")
     await repo.update_fields(file_id="file-test", data={"processing_job_id": "progress-old", "processing_owner": "old"})
     generation = await repo.begin_index_generation(
         kb_id="kb-test", file_id="file-test", processing_job_id="progress-old", processing_owner="old"
