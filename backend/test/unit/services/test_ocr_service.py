@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-import yuxi.modules.documents.service as ocr_service
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+import yuxi.modules.documents.service as ocr_service
 from test.support.sqlite import create_utc_sqlite_engine
 from yuxi.bootstrap.options import ensure_options_in_db
 from yuxi.infrastructure.document_parsing.engines import ENGINE_SPECS

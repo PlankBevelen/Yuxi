@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import pytest
-
-
 import asyncio
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from yuxi.modules.knowledge.graphs.extractors import GraphExtractorFactory, normalize_extraction_result
-from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
 from yuxi.modules.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
 
 pytestmark = pytest.mark.usefixtures("milvus_graph_projection_lock")
 
@@ -153,7 +152,7 @@ async def test_graph_build_keeps_extraction_concurrency_full_while_writes_are_bl
         calls = 0
         completed = 0
 
-        async def extract(self, text, *, chunk_metadata=None):
+        async def extract(self, text):
             self.calls += 1
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -250,7 +249,7 @@ async def test_graph_build_cancellation_stops_backpressured_extraction_queue(mon
     class Extractor:
         extractor_type = "llm"
 
-        async def extract(self, text, *, chunk_metadata=None):
+        async def extract(self, text):
             extraction_started.set()
             await never_finish.wait()
 

@@ -8,14 +8,14 @@ import pytest
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
+import yuxi.api.routers.extensions.mcp as mcp_router
+import yuxi.api.routers.extensions.skills as skill_router
 import yuxi.api.routers.identity.auth as auth_router
-import yuxi.api.routers.knowledge.graphs as graph_router
 import yuxi.api.routers.knowledge.dashboard as knowledge_dashboard_router
 import yuxi.api.routers.knowledge.evaluation as knowledge_eval_router
+import yuxi.api.routers.knowledge.graphs as graph_router
 import yuxi.api.routers.knowledge.management as knowledge_router
-import yuxi.api.routers.extensions.mcp as mcp_router
 import yuxi.api.routers.models as model_provider_router
-import yuxi.api.routers.extensions.skills as skill_router
 import yuxi.api.routers.system as system_router
 import yuxi.modules.knowledge.services.document_actions as document_actions
 
@@ -112,9 +112,9 @@ async def test_document_submission_preserves_http_exception(monkeypatch, pending
 
     with pytest.raises(HTTPException) as caught:
         if pending:
-            await knowledge_router._enqueue_pending_document_action_job(**kwargs)
+            await document_actions.submit_pending_document_action(**kwargs)
         else:
-            await knowledge_router._enqueue_document_action_job(**kwargs, file_ids=["file-1"])
+            await document_actions.submit_document_action(**kwargs, file_ids=["file-1"])
 
     assert caught.value is error
 
@@ -125,14 +125,14 @@ async def test_document_download_preserves_inner_http_exception(monkeypatch):
     error = HTTPException(404, "对象不存在")
     monkeypatch.setattr(knowledge_router, "_ensure_knowledge_base_supports_documents", AsyncMock())
     monkeypatch.setattr(
-        knowledge_router.knowledge_base_manager,
-        "get_file_basic_info",
-        AsyncMock(return_value={"meta": {"path": "http://minio:9000/documents/file.txt"}}),
+        knowledge_router.documents,
+        "load_file_meta",
+        AsyncMock(return_value={"path": "http://minio:9000/documents/file.txt"}),
     )
-    monkeypatch.setattr(knowledge_router, "is_minio_url", lambda _path: True)
-    monkeypatch.setattr(knowledge_router, "parse_minio_url", lambda _path: ("documents", "file.txt"))
+    monkeypatch.setattr(knowledge_router.documents, "is_minio_url", lambda _path: True)
+    monkeypatch.setattr(knowledge_router.documents, "parse_minio_url", lambda _path: ("documents", "file.txt"))
     client = SimpleNamespace(adownload_response=AsyncMock(side_effect=error))
-    monkeypatch.setattr(knowledge_router, "get_minio_client", lambda: client)
+    monkeypatch.setattr(knowledge_router.documents, "get_minio_client", lambda: client)
 
     with pytest.raises(HTTPException) as caught:
         await knowledge_router.download_document("kb-1", "file-1", current_user=SimpleNamespace(uid="user-1"))

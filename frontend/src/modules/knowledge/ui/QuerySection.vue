@@ -131,7 +131,7 @@
       </div>
       <aside v-if="selectedChunk" class="query-document-preview" aria-label="命中片段原文">
         <ExternalDocumentReader
-          v-if="store.knowledgeBase?.kb_type === 'feishu'"
+          v-if="store.knowledgeBase?.supports_document_read && !store.knowledgeBase?.supports_documents"
           :kb-id="store.knowledgeBase.kb_id"
           :file-id="selectedChunk.metadata.file_id"
           :title="selectedChunk.metadata.source"
@@ -328,11 +328,8 @@ const onQuery = async () => {
   const requestId = queryRequest
   store.state.searchLoading = true
 
-  // 从store中获取配置参数
-  const queryMeta = { ...store.meta }
-
   try {
-    const data = await queryApi.queryTest(store.knowledgeBase.kb_id, queryText.value.trim(), queryMeta)
+    const data = await queryApi.queryTest(store.knowledgeBase.kb_id, queryText.value.trim())
     if (requestId !== queryRequest) return
     queryResult.value = data
   } catch (error) {
@@ -347,9 +344,6 @@ const onQuery = async () => {
 
 // 组件挂载时启动示例轮播
 onMounted(async () => {
-  // 加载查询参数
-  store.loadQueryParams()
-
   // 加载示例问题
   await loadSampleQuestions()
   // 不自动生成，只在创建知识库和添加文件时由 KnowledgeBaseInfoView 触发生成

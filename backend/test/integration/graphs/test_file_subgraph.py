@@ -144,6 +144,7 @@ async def test_file_subgraph_scopes_mentions_before_limit_and_rejects_other_file
             assert {node["name"].lower() for node in data["nodes"]} == {"alpha", "beta", "isolated", "alpha beta"}
             assert data["edges"] == []
             assert "other secret" not in response.text and "stale" not in response.text.lower()
+            assert all(node["normalized"]["name"] == node["name"] for node in data["nodes"])
             response = await client.get("/api/graph/subgraph", params={"kb_id": kb_id, "file_id": "a"})
             assert len(response.json()["data"]["nodes"]) == 5
             assert len(response.json()["data"]["edges"]) == 4
@@ -222,6 +223,15 @@ async def test_file_subgraph_scopes_mentions_before_limit_and_rejects_other_file
                 await conn.execute(text("UPDATE knowledge_files SET active_generation = 1 WHERE file_id = 'a'"))
             response = await client.get("/api/graph/subgraph", params={"kb_id": kb_id, "file_id": "a", "exclude_chunk": "true"})
             assert [node["name"] for node in response.json()["data"]["nodes"]] == ["Stale"]
+            # 共享实体最近由 b 写入；b 代次失效后，全库输出不能残留该来源的两份名称。
+            async with engine.begin() as conn:
+                await conn.execute(text("UPDATE knowledge_files SET active_generation = 2 WHERE file_id IN ('a', 'b')"))
+            response = await client.get("/api/graph/subgraph", params={"kb_id": kb_id, "exclude_chunk": "true"})
+            assert response.status_code == 200, response.text
+            shared = next(node for node in response.json()["data"]["nodes"] if node["name"] == "alpha beta")
+            assert shared["normalized"]["name"] == "alpha beta"
+            assert "source_chunk_id" not in shared["properties"]
+
     finally:
         with service.driver.session() as session:
             session.run(f"MATCH (n:MilvusKB:`{label}`) DETACH DELETE n").consume()

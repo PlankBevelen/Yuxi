@@ -100,19 +100,20 @@ def test_qa_repeated_answer_uses_its_own_source_lines():
     assert [(row["start_line"], row["end_line"]) for row in records] == [(1, 2), (4, 5)]
 
 
-def test_csv_escaped_quotes_keep_complete_record_range():
-    """CSV 结构引号不能冒充跨行字段的正文来源。"""
-    source = '"Q","""\n"""'
+def test_csv_markdown_quotes_keep_data_row_range():
+    """CSV 已转成 Markdown，字段引号属于正文而非第二次 CSV 协议。"""
+    source = '| question | answer |\n|---|---|\n| Q | "quoted" |'
     records = chunk_markdown(source, "file", "qa.csv", {"chunk_preset_id": "qa"})
-    assert (records[0]["start_line"], records[0]["end_line"]) == (1, 2)
+    assert [row["content"] for row in records] == ['问题：Q\t回答："quoted"']
+    assert (records[0]["start_line"], records[0]["end_line"]) == (3, 3)
 
 
-def test_long_csv_answer_keeps_record_range_after_subdivision():
-    """CSV 解码后的长问答子块仍定位到完整原始 record。"""
-    source = '"问题","' + "长答案" * 2000 + '"'
+def test_long_csv_markdown_answer_keeps_data_row_range_after_subdivision():
+    """转换后表体的长答案子块仍定位到同一完整原文行。"""
+    source = "| question | answer |\n|---|---|\n| 问题 | " + "长答案" * 2000 + " |"
     records = chunk_markdown(source, "file", "qa.csv", {"chunk_preset_id": "qa"})
     assert len(records) > 1
-    assert all((row["start_line"], row["end_line"]) == (1, 1) for row in records)
+    assert all((row["start_line"], row["end_line"]) == (3, 3) for row in records)
 
 
 @pytest.mark.parametrize("closing", ["````", "    ```", ""])

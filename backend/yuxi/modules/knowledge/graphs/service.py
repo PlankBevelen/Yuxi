@@ -511,15 +511,9 @@ class KnowledgeGraphService:
         if details.get("status") == "failed":
             await self.chunk_repo.mark_graph_extraction_pending(chunk.chunk_id)
 
-        metadata = {
-            "kb_id": kb_id,
-            "chunk_id": chunk.chunk_id,
-            "file_id": chunk.file_id,
-            "chunk_index": chunk.chunk_index,
-        }
         for attempt in range(1, GRAPH_EXTRACTION_MAX_ATTEMPTS + 1):
             try:
-                extraction_result = await extractor.extract(chunk.content, chunk_metadata=metadata)
+                extraction_result = await extractor.extract(chunk.content)
                 normalized_result = normalize_extraction_result(extraction_result, extractor_type)
                 await self.chunk_repo.update_extraction_result(chunk.chunk_id, normalized_result, attempt)
                 return normalized_result
@@ -726,20 +720,16 @@ class KnowledgeGraphService:
                 return result
 
         limit = max_nodes
-        try:
-            result = await run_neo4j_query_io(
-                self._query_nodes_sync,
-                effective_kb_id,
-                label,
-                keyword,
-                limit,
-                max_depth,
-                exclude_chunk,
-            )
-            return await self._filter_visible_subgraph(effective_kb_id, result)
-        except Exception as e:
-            logger.error(f"Milvus graph query failed: {e}")
-            return {"nodes": [], "edges": []}
+        result = await run_neo4j_query_io(
+            self._query_nodes_sync,
+            effective_kb_id,
+            label,
+            keyword,
+            limit,
+            max_depth,
+            exclude_chunk,
+        )
+        return await self._filter_visible_subgraph(effective_kb_id, result)
 
     def _query_file_nodes_sync(
         self,
@@ -819,7 +809,7 @@ class KnowledgeGraphService:
                 max_depth = min(max_depth, 3)
                 query_params["path_limit"] = max(limit, 1) * 10
             result = session.run(
-                self._build_query(label, keyword, limit, max_depth, exclude_chunk),
+                self._build_query(label, keyword, max_depth, exclude_chunk),
                 **query_params,
             )
             if max_depth <= 0:
@@ -853,18 +843,14 @@ class KnowledgeGraphService:
         UNWIND relationships(rel_path) AS rel
         RETURN graph_nodes AS nodes, collect(DISTINCT rel) AS edges
         """
-        try:
-            result = await run_neo4j_query_io(
-                self._query_seed_subgraph_sync,
-                kb_id,
-                cypher,
-                seed_entity_ids,
-                max_nodes,
-            )
-            return await self._filter_visible_subgraph(kb_id, result)
-        except Exception as e:
-            logger.error(f"Milvus seed subgraph query failed: {e}")
-            return {"nodes": [], "edges": []}
+        result = await run_neo4j_query_io(
+            self._query_seed_subgraph_sync,
+            kb_id,
+            cypher,
+            seed_entity_ids,
+            max_nodes,
+        )
+        return await self._filter_visible_subgraph(kb_id, result)
 
     def _query_seed_subgraph_sync(
         self,
@@ -970,12 +956,8 @@ class KnowledgeGraphService:
         RETURN node_label
         ORDER BY node_label
         """
-        try:
-            records = await run_neo4j_query_io(self._get_labels_sync, cypher, effective_kb_id)
-            return [record["node_label"] for record in records]
-        except Exception as e:
-            logger.error(f"Failed to get Milvus graph labels: {e}")
-            return []
+        records = await run_neo4j_query_io(self._get_labels_sync, cypher, effective_kb_id)
+        return [record["node_label"] for record in records]
 
     def _get_labels_sync(self, cypher: str, kb_id: str) -> list[Any]:
         return neo4j_read(self.driver, cypher, kb_id=kb_id)
@@ -998,11 +980,7 @@ class KnowledgeGraphService:
         RETURN entity_label, count
         ORDER BY count DESC
         """
-        try:
-            return await run_neo4j_query_io(self._get_stats_sync, stats_cypher, label_cypher)
-        except Exception as e:
-            logger.error(f"Failed to get Milvus graph stats: {e}")
-            return {"total_nodes": 0, "total_edges": 0, "entity_types": []}
+        return await run_neo4j_query_io(self._get_stats_sync, stats_cypher, label_cypher)
 
     def _get_stats_sync(self, stats_cypher: str, label_cypher: str) -> dict[str, Any]:
         with self.driver.session() as session:
@@ -1269,6 +1247,7 @@ class KnowledgeGraphService:
                     key: properties[key] for key in ("entity_id", "normalized_name", "label", "kb_id") if key in properties
                 }
                 node["name"] = properties["normalized_name"]
+                node["normalized"]["name"] = node["name"]
         node_ids = {n["id"] for n in nodes}
         edges = [
             e
@@ -1290,7 +1269,7 @@ class KnowledgeGraphService:
             )
         return "WHERE " + " AND ".join(clauses) if clauses else ""
 
-    def _build_query(self, label: str, keyword: str, limit: int, max_depth: int, exclude_chunk: bool = False) -> str:
+    def _build_query(self, label: str, keyword: str, max_depth: int, exclude_chunk: bool = False) -> str:
         where = self._build_where(exclude_chunk, keyword)
 
         if max_depth <= 0:

@@ -159,10 +159,10 @@ async def test_connections_do_not_share_tokens(connector, config, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_readonly_rejects_upload_and_invalid_ids(connector, config):
+async def test_readonly_rejects_parsing_and_invalid_ids(connector, config):
     """在线阅读不开放文档写操作，路径输入在请求前拒绝。"""
     with pytest.raises(ValueError, match="只读"):
-        await connector.add_file_record(config.kb_id, "file", additional_params=config.additional_params)
+        await connector.parse_file(config.kb_id, "file", additional_params=config.additional_params)
     with pytest.raises(ValueError, match="ID 无效"):
         await connector.open_document(config.kb_id, "../outside", config=config)
 

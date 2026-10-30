@@ -8,7 +8,6 @@ import os
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import requests
@@ -19,11 +18,6 @@ from yuxi.infrastructure.document_parsing.engines import DocumentEngine
 from yuxi.infrastructure.observability.logging import logger
 
 DEFAULT_PADDLEOCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-
-
-def _is_remote_url(value: str) -> bool:
-    """判断输入是否为可直接提交的 HTTP(S) 地址。"""
-    return value.startswith(("http://", "https://"))
 
 
 class PaddleOCRAPIParser(DocumentEngine):
@@ -52,11 +46,11 @@ class PaddleOCRAPIParser(DocumentEngine):
         }
 
     def process_file(self, file_path: str, output_dir: Path, params: dict[str, Any] | None = None) -> str:
-        """提交本地文件或远端 URL，轮询结果并提取 Markdown。"""
-        if not os.path.exists(file_path) and not _is_remote_url(file_path):
+        """提交本地文件，轮询结果并提取 Markdown。"""
+        if not os.path.isfile(file_path):
             raise DocumentParserException(f"文件不存在: {file_path}", self.get_service_name(), "file_not_found")
 
-        file_ext = self._file_extension(file_path)
+        file_ext = Path(file_path).suffix.lower()
         if file_ext and not self.supports_file_type(file_ext):
             raise DocumentParserException(f"不支持的文件类型: {file_ext}", self.get_service_name(), "unsupported_file_type")
 
@@ -93,12 +87,6 @@ class PaddleOCRAPIParser(DocumentEngine):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"bearer {self.api_token}"}
 
-    def _file_extension(self, file_path: str) -> str:
-        """从本地路径或 URL 的路径部分提取小写扩展名。"""
-        if _is_remote_url(file_path):
-            return Path(urlparse(file_path).path).suffix.lower()
-        return Path(file_path).suffix.lower()
-
     def _resolve_optional_payload(self, params: dict[str, Any]) -> dict[str, Any]:
         payload: dict[str, Any] = dict(self.default_optional_payload)
         overrides = params.get("optional_payload")
@@ -115,22 +103,14 @@ class PaddleOCRAPIParser(DocumentEngine):
         optional_payload = self._resolve_optional_payload(params)
         headers = self._headers()
 
-        if _is_remote_url(file_path):
+        with open(file_path, "rb") as file:
             response = requests.post(
                 self.api_url,
-                headers={**headers, "Content-Type": "application/json"},
-                json={"fileUrl": file_path, "model": self.model, "optionalPayload": optional_payload},
+                headers=headers,
+                data={"model": self.model, "optionalPayload": json.dumps(optional_payload, ensure_ascii=False)},
+                files={"file": file},
                 timeout=60,
             )
-        else:
-            with open(file_path, "rb") as file:
-                response = requests.post(
-                    self.api_url,
-                    headers=headers,
-                    data={"model": self.model, "optionalPayload": json.dumps(optional_payload, ensure_ascii=False)},
-                    files={"file": file},
-                    timeout=60,
-                )
 
         if response.status_code != 200:
             raise DocumentParserException(

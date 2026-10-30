@@ -1,10 +1,6 @@
 import { apiGet } from './base'
 
 export const graphApi = {
-  getGraphs: async () => {
-    return await apiGet('/api/graph/list', {}, true)
-  },
-
   getSubgraph: async (params) => {
     const {
       kb_id,
@@ -30,25 +26,5 @@ export const graphApi = {
     if (file_id) queryParams.set('file_id', file_id)
 
     return await apiGet(`/api/graph/subgraph?${queryParams.toString()}`, {}, true)
-  },
-
-  getStats: async (kb_id) => {
-    if (!kb_id) {
-      throw new Error('kb_id is required')
-    }
-
-    const queryParams = new URLSearchParams({ kb_id })
-    return await apiGet(`/api/graph/stats?${queryParams.toString()}`, {}, true)
-  },
-
-  getLabels: async (kb_id) => {
-    if (!kb_id) {
-      throw new Error('kb_id is required')
-    }
-
-    const queryParams = new URLSearchParams({ kb_id })
-    return await apiGet(`/api/graph/labels?${queryParams.toString()}`, {}, true)
   }
 }
-
-export const unifiedApi = graphApi

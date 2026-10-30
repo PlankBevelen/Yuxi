@@ -1,5 +1,3 @@
-from test.unit.support.milvus import fake_milvus_embedding as fake_milvus_embedding
-from yuxi.modules.knowledge.storage.milvus import CONTENT_ANALYZER_PARAMS
 import asyncio
 import threading
 import types
@@ -10,14 +8,6 @@ import pytest
 from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType
 
 import yuxi.modules.knowledge.implementations.milvus as milvus_module
-from yuxi.modules.knowledge.base import FileStatus, KnowledgeExecutor
-from yuxi.modules.knowledge.chunking.ragflow_like.nlp import count_tokens
-from yuxi.modules.knowledge.implementations.milvus import (
-    CONTENT_SPARSE_FIELD,
-    VECTOR_METRIC_TYPE,
-    MilvusKB,
-    _retrieval_config_options,
-)
 from test.unit.support.knowledge import make_knowledge_file_record
 from test.unit.support.milvus import (
     EMBEDDING_MODEL_SPEC,
@@ -26,6 +16,18 @@ from test.unit.support.milvus import (
     make_kb,
     make_query_config,
 )
+from test.unit.support.milvus import fake_milvus_embedding as fake_milvus_embedding
+from yuxi.modules.knowledge.base import FileStatus, KnowledgeExecutor
+from yuxi.modules.knowledge.chunking.ragflow_like.nlp import count_tokens
+from yuxi.modules.knowledge.implementations.milvus import (
+    CONTENT_SPARSE_FIELD,
+    VECTOR_METRIC_TYPE,
+    MilvusKB,
+    _retrieval_config_options,
+)
+from yuxi.modules.knowledge.manager import KnowledgeBaseManager
+from yuxi.modules.knowledge.services import documents
+from yuxi.modules.knowledge.storage.milvus import CONTENT_ANALYZER_PARAMS
 
 
 def test_milvus_retrieval_config_exposes_graph_and_dependencies(monkeypatch):
@@ -232,39 +234,6 @@ async def test_cleanup_knowledge_base_resources_offloads_milvus_cleanup(monkeypa
     assert all(thread_id != event_loop_thread for thread_id in cleanup_threads)
 
 
-async def test_detect_data_inconsistencies_stays_in_milvus_executor(monkeypatch):
-    kb = MilvusKB.__new__(MilvusKB)
-    kb.connection_alias = "test-alias"
-
-    class FakeCollection:
-        def __init__(self, name: str, using: str):
-            assert using == "test-alias"
-            self.num_entities = 4 if name == "kb_managed" else 2
-            self.description = f"collection:{name}"
-
-    class FakeRepository:
-        async def get_kb_file_stats(self, kb_id: str):
-            assert kb_id == "kb_managed"
-            return {"file_count": 0}
-
-    monkeypatch.setattr(milvus_module.utility, "list_collections", lambda using: ["kb_managed", "kb_orphan"])
-    monkeypatch.setattr(milvus_module.utility, "has_collection", lambda name, using: name == "kb_managed")
-    monkeypatch.setattr(milvus_module, "Collection", FakeCollection)
-    monkeypatch.setattr(milvus_module, "KnowledgeFileRepository", FakeRepository)
-
-    result = await kb.detect_data_inconsistencies({"kb_managed"}, {"kb_managed"})
-
-    assert [item["collection_name"] for item in result["missing_collections"]] == ["kb_orphan"]
-    assert result["missing_files"] == [
-        {
-            "kb_id": "kb_managed",
-            "vector_count": 4,
-            "metadata_files_count": 0,
-            "detected_at": result["missing_files"][0]["detected_at"],
-        }
-    ]
-
-
 def test_build_chunk_pg_records_preserves_extraction_result():
     kb = MilvusKB.__new__(MilvusKB)
 
@@ -362,7 +331,7 @@ async def test_index_file_persists_chunk_stats(monkeypatch):
         store_calls.append((kb_id, file_id, collection_arg, list(chunk_records), embedding_fn))
 
     kb._get_or_create_milvus_collection = get_collection
-    kb._read_markdown_from_minio = read_markdown
+    monkeypatch.setattr(documents, "read_markdown_from_minio", read_markdown)
     kb._split_text_into_chunks = lambda text, file_id, filename, params: chunks
     monkeypatch.setattr(milvus_module, "get_embedding_function", lambda embedding_model_spec: embedding_function)
     kb.delete_file_chunks_only = delete_file_chunks_only
@@ -436,7 +405,7 @@ async def test_cancellation_marks_file_retryable(monkeypatch, operation, expecte
 
         kb._get_or_create_milvus_collection = get_collection
         monkeypatch.setattr(milvus_module, "get_embedding_function", lambda embedding_model_spec: None)
-        kb._read_markdown_from_minio = cancelled_step
+        monkeypatch.setattr(documents, "read_markdown_from_minio", cancelled_step)
 
         async def get_system_options(_option, _db=None):
             return {"embed_model": EMBEDDING_MODEL_SPEC}
@@ -504,7 +473,6 @@ async def test_delete_file_commits_invisibility_without_external_cleanup(monkeyp
     """外部不可用不阻止 PG 删除；请求线程不能先调用外部清理。"""
     error = RuntimeError("external storage unavailable")
     chunk_repo = types.SimpleNamespace(
-        count_graph_indexed_by_file_id=AsyncMock(return_value=1 if failure == "graph" else 0),
         delete_by_file_id=AsyncMock(),
     )
     monkeypatch.setattr(milvus_module, "KnowledgeChunkRepository", lambda: chunk_repo)
@@ -518,7 +486,10 @@ async def test_delete_file_commits_invisibility_without_external_cleanup(monkeyp
     kb._get_existing_milvus_collection = AsyncMock(return_value=FakeCollection())
     kb._delete_file_chunks_from_milvus = AsyncMock(side_effect=error)
 
-    await kb.delete_file("db", "file-1")
+    manager = object.__new__(KnowledgeBaseManager)
+    monkeypatch.setattr(manager, "_require_kb_supports_documents", AsyncMock())
+    monkeypatch.setattr(manager, "_refresh_knowledge_base_stats", AsyncMock())
+    await manager.delete_file("db", "file-1")
 
     assert file_repo.records["file-1"].status == "deleted"
     assert file_repo.records["file-1"].deleted_at is not None
@@ -916,7 +887,7 @@ def test_query_params_config_uses_bm25_parameters(monkeypatch):
     monkeypatch.setattr(milvus_module.model_cache, "get_all_specs", lambda _type=None: [])
     kb = MilvusKB.__new__(MilvusKB)
 
-    config = kb.get_query_params_config("db")
+    config = kb.get_query_params_config()
 
     option_keys = {option["key"] for option in config["options"]}
     assert "keyword_top_k" not in option_keys
@@ -1063,8 +1034,8 @@ async def test_document_preview_location_requires_matching_index_snapshot(monkey
             list_by_file_id=AsyncMock(return_value=[chunk]),
         ),
     )
-    kb._read_markdown_from_minio = AsyncMock(return_value=content)
-    result = await kb._get_file_content_from_meta(
+    monkeypatch.setattr(documents, "read_markdown_from_minio", AsyncMock(return_value=content))
+    result = await documents.get_file_content_from_meta(
         "file",
         {
             "status": status,

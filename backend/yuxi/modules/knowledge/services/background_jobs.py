@@ -24,7 +24,10 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
     """从持久 payload 重建文档添加、解析和可选索引流程。"""
     payload = context.payload
     kb_id = payload["kb_id"]
-    added_files = [{**record, "index": index} for index, record in enumerate(payload["files"])]
+    # 历史 pending intent 使用 files；新登记只保存有序 file_ids。
+    file_ids = payload.get("file_ids")
+    if file_ids is None:
+        file_ids = [record["file_id"] for record in payload["files"]]
     params = dict(payload.get("params") or {})
     operator_id = payload["operator_id"]
     auto_index = bool(params.get("auto_index", False))
@@ -35,15 +38,15 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
     }
 
     await context.set_progress(5.0, "准备处理文档")
-    total = len(added_files)
+    total = len(file_ids)
     # 结果按输入顺序逐个写入：auto_index 下已解析文件先持有解析结果，入库阶段再按 index 覆盖为入库结果。
     processed_items: list[dict] = []
-    parsed_files: list[dict] = []
+    parsed_files: list[tuple[int, str]] = []
 
     try:
         # 进度刻度：5 准备、30–parse_end 解析（auto_index 为入库预留 60–95 段）、100 收尾。
         parse_end = 60.0 if auto_index else 95.0
-        for index, record in enumerate(added_files, 1):
+        for index, file_id in enumerate(file_ids, 1):
             await context.raise_if_cancelled()
             await context.set_progress(
                 30.0 + (index / total) * (parse_end - 30.0),
@@ -52,45 +55,45 @@ async def run_knowledge_ingest(context: BackgroundJobContext) -> dict:
             try:
                 file_meta = await knowledge_base.parse_file(
                     kb_id,
-                    record["file_id"],
+                    file_id,
                     operator_id=operator_id,
                     **processing_owner,
                 )
                 processed_items.append(file_meta)
                 if auto_index and file_meta.get("status") == "parsed":
-                    parsed_files.append(record)
+                    parsed_files.append((index - 1, file_id))
             except Exception as exc:
-                _log_document_failure(context, kb_id=kb_id, action="parse", exc=exc, file_id=record["file_id"])
+                _log_document_failure(context, kb_id=kb_id, action="parse", exc=exc, file_id=file_id)
                 timed_out = isinstance(exc, TimeoutError)
                 error_type = "timeout" if timed_out else "parse_failed"
                 error_message = "解析超时" if timed_out else "解析失败"
                 processed_items.append(
                     {
-                        "item": record["item"],
+                        "file_id": file_id,
                         "status": "failed",
                         "error": f"{error_message}: {exc}",
                         "error_type": error_type,
                     }
                 )
 
-        for index, record in enumerate(parsed_files, 1):
+        for index, (result_index, file_id) in enumerate(parsed_files, 1):
             await context.raise_if_cancelled()
             await context.set_progress(
                 60.0 + (index / len(parsed_files)) * 35.0,
                 f"[3/3] 入库文件 {index}/{len(parsed_files)}",
             )
             try:
-                processed_items[record["index"]] = await knowledge_base.index_file(
+                processed_items[result_index] = await knowledge_base.index_file(
                     kb_id,
-                    record["file_id"],
+                    file_id,
                     operator_id=operator_id,
                     params=indexing_params,
                     **processing_owner,
                 )
             except Exception as exc:
-                _log_document_failure(context, kb_id=kb_id, action="index", exc=exc, file_id=record["file_id"])
-                processed_items[record["index"]] = {
-                    "item": record["item"],
+                _log_document_failure(context, kb_id=kb_id, action="index", exc=exc, file_id=file_id)
+                processed_items[result_index] = {
+                    "file_id": file_id,
                     "status": "failed",
                     "error": f"入库失败: {exc}",
                     "error_type": "index_failed",

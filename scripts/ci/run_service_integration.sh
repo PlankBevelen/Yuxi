@@ -64,6 +64,8 @@ uv run --locked --group test pytest \
     test/integration/services/test_oidc_login_transaction.py \
     test/integration/services/test_password_login_boundary.py \
     test/integration/services/test_knowledge_projection_integrity.py \
+    test/integration/services/test_knowledge_metadata_boundary.py \
+    test/integration/services/test_knowledge_evaluation_reads.py \
     test/integration/services/test_knowledge_directory_migration.py \
     test/integration/services/test_database_relation_integrity.py \
     test/integration/services/test_database_access_paths.py \

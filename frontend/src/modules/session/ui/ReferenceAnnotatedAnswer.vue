@@ -14,22 +14,24 @@
     <p class="reference-quote">{{ selected?.quote }}</p>
     <p class="reference-location-notice">此来源暂不支持原文行定位。</p>
   </a-modal>
-  <FileDetailModal
-    v-if="selected?.source.kind === 'knowledge' && selected.source.supports_documents && selected.source.file_id"
-    v-model:open="fileOpen"
-    :kb-id="selected.source.kb_id"
-    :file-id="selected.source.file_id"
-    :start-line="selected.source_start_line"
-    :end-line="selected.source_end_line"
-    :reference-source="selected.source"
-  />
+  <a-modal v-model:open="fileOpen" :footer="null" :width="900" :title="selected?.source.title" destroy-on-close>
+    <ExternalDocumentReader
+      v-if="fileOpen && selected?.source.file_id"
+      :kb-id="selected.source.kb_id"
+      :file-id="selected.source.file_id"
+      :title="selected.source.title"
+      :start-line="selected.source_start_line"
+      :end-line="selected.source_end_line"
+      @close="fileOpen = false"
+    />
+  </a-modal>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import { threadApi } from '@/apis/agent_api'
 import MarkdownPreview from '@/modules/workspace/ui/MarkdownPreview.vue'
-import FileDetailModal from '@/modules/knowledge/ui/FileDetailModal.vue'
+import ExternalDocumentReader from '@/modules/knowledge/ui/ExternalDocumentReader.vue'
 import { useTurnReferencesStore } from '@/modules/session/model/turnReferences'
 
 const props = defineProps({
@@ -59,13 +61,15 @@ const citations = computed(() => {
 })
 
 function openReference(citation) {
+  fileOpen.value = false
+  snippetOpen.value = false
   selected.value = citation
   if (citation.source.kind === 'web') {
     const url = new URL(citation.source.url)
     if (['http:', 'https:'].includes(url.protocol)) window.open(url.href, '_blank', 'noopener,noreferrer')
     return
   }
-  if (citation.source.supports_documents && citation.source.file_id) fileOpen.value = true
+  if (citation.source.supports_document_read && citation.source.file_id) fileOpen.value = true
   else snippetOpen.value = true
 }
 </script>

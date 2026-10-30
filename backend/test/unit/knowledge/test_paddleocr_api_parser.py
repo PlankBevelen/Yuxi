@@ -10,9 +10,9 @@ import pytest
 
 import yuxi.infrastructure.document_parsing.engines.paddleocr_api as paddleocr_api
 from yuxi.infrastructure.document_parsing import DocumentParserException
+from yuxi.infrastructure.document_parsing.artifacts import local_image_links
 from yuxi.infrastructure.document_parsing.engines.paddleocr_api import PaddleOCRPPOCRv6Parser, PaddleOCRVLParser
 from yuxi.infrastructure.document_parsing.engines.pp_structure_v3 import PPStructureV3Parser
-from yuxi.infrastructure.document_parsing.artifacts import local_image_links
 
 
 @dataclass
@@ -70,11 +70,10 @@ def test_layout_images_preserve_titles_and_reference_links(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("parser_type", "input_url", "job_id", "result_body", "expected_result", "expected_model", "optional_payload", "expected_payload"),
+    ("parser_type", "job_id", "result_body", "expected_result", "expected_model", "optional_payload", "expected_payload"),
     [
         pytest.param(
             PaddleOCRVLParser,
-            None,
             "job-vl",
             {
                 "result": {
@@ -93,7 +92,6 @@ def test_layout_images_preserve_titles_and_reference_links(tmp_path, monkeypatch
         ),
         pytest.param(
             PaddleOCRPPOCRv6Parser,
-            None,
             "job-ocr",
             {"result": {"ocrResults": [{"prunedResult": {"rec_texts": ["PaddleOCR API Test", "", "Invoice total: 123.45"]}}]}},
             "PaddleOCR API Test\nInvoice total: 123.45",
@@ -106,24 +104,12 @@ def test_layout_images_preserve_titles_and_reference_links(tmp_path, monkeypatch
             },
             id="pp-ocr-upload",
         ),
-        pytest.param(
-            PaddleOCRPPOCRv6Parser,
-            "https://example.test/file.png?signature=abc",
-            "job-url",
-            {"result": {"ocrResults": [{"prunedResult": {"rec_texts": ["url text"]}}]}},
-            "url text",
-            "PP-OCRv6",
-            None,
-            None,
-            id="pp-ocr-url",
-        ),
     ],
 )
 def test_paddleocr_submits_model_specific_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     parser_type,
-    input_url: str | None,
     job_id: str,
     result_body: dict[str, Any],
     expected_result: str,
@@ -148,20 +134,13 @@ def test_paddleocr_submits_model_specific_payload(
     monkeypatch.setattr(paddleocr_api.requests, "post", fake_post)
     monkeypatch.setattr(paddleocr_api.requests, "get", fake_get)
 
-    source = input_url or str(_build_file(tmp_path))
+    source = str(_build_file(tmp_path))
     params = {"optional_payload": optional_payload} if optional_payload is not None else None
     result = parser_type(api_token="token").process_file(source, tmp_path, params=params)
 
     assert result == expected_result
-    if input_url:
-        assert submitted["headers"]["Content-Type"] == "application/json"
-        assert submitted["data"] is None
-        assert submitted["files"] is None
-        assert submitted["json"]["fileUrl"] == input_url
-        assert submitted["json"]["model"] == expected_model
-    else:
-        assert submitted["data"]["model"] == expected_model
-        assert json.loads(submitted["data"]["optionalPayload"]) == expected_payload
+    assert submitted["data"]["model"] == expected_model
+    assert json.loads(submitted["data"]["optionalPayload"]) == expected_payload
 
 
 def test_paddleocr_poll_handles_pending_running_and_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,3 +259,13 @@ def test_paddleocr_vl_saves_markdown_images_locally(tmp_path: Path, monkeypatch:
     assert (tmp_path / relative).read_bytes() == b"image-bytes"
     assert result == f"before ![]({relative}) after"
     assert not relative.startswith("/api/")
+
+
+@pytest.mark.parametrize("source", ["https://example.test/document.pdf", "directory"])
+def test_paddle_input_requires_a_local_file(tmp_path, source):
+    """远端地址与目录不能绕过统一输入暂存边界。"""
+    if source == "directory":
+        source = str(tmp_path)
+    parser = PaddleOCRVLParser(api_token="test-token")
+    with pytest.raises(DocumentParserException, match="文件不存在"):
+        parser.process_file(source, tmp_path)

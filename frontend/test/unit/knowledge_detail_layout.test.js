@@ -25,12 +25,12 @@ test('知识库详情提供面板插槽并校验深链接 Tab', () => {
 })
 
 test('详情按在线阅读能力开放，配置入口仍要求管理权限', () => {
-  const feishu = { kb_type: 'feishu', supports_documents: false }
+  const feishu = { kb_type: 'feishu', supports_documents: false, supports_document_read: true }
   assert.equal(supportsKnowledgeBaseDetail(feishu), true)
   assert.equal(isReadOnlyKnowledgeBase(feishu), true)
-  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'milvus' }), true)
-  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'dify' }), false)
-  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'notion' }), false)
+  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'milvus', supports_document_read: true }), true)
+  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'dify', supports_document_read: false }), false)
+  assert.equal(supportsKnowledgeBaseDetail({ kb_type: 'notion', supports_document_read: false }), false)
 
   const listSource = readSource('../../src/modules/knowledge/ui/KnowledgeCatalog.vue')
   const detailSource = readSource('../../src/pages/KnowledgeBaseInfoView.vue')
@@ -45,4 +45,5 @@ test('检索面板强制挂载以保留上传后的示例问题生成', () => {
   const detailSource = readSource('../../src/pages/KnowledgeBaseInfoView.vue')
 
   assert.match(detailSource, /key: 'query', label: '检索测试', icon: Search, forceRender: true/)
+  assert.match(detailSource, /<SearchConfigPanel\b[^>]*:key="kbId"/, '配置草稿实例必须归属当前知识库')
 })

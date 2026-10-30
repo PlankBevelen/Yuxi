@@ -4,7 +4,7 @@
       <p>调整分块参数可以控制文本的切分方式，影响检索质量和文档加载效率。</p>
     </div>
     <a-form :model="localParams" name="chunkConfig" autocomplete="off" layout="vertical">
-      <a-form-item v-if="showPreset" name="chunk_preset_id">
+      <a-form-item name="chunk_preset_id">
         <template #label>
           <span class="chunk-preset-label">
             分块策略
@@ -26,7 +26,7 @@
       </a-form-item>
 
       <div class="chunk-row">
-        <a-form-item v-if="showChunkSizeOverlap" name="chunk_token_num">
+        <a-form-item name="chunk_token_num">
           <template #label>
             <span class="chunk-preset-label">
               最大 Token 数
@@ -43,7 +43,7 @@
             style="width: 100%"
           />
         </a-form-item>
-        <a-form-item v-if="showChunkSizeOverlap" name="overlapped_percent">
+        <a-form-item name="overlapped_percent">
           <template #label>
             <span class="chunk-preset-label">
               重叠比例 (%)
@@ -60,7 +60,7 @@
             style="width: 100%"
           />
         </a-form-item>
-        <a-form-item v-if="showQaSplit" name="delimiter">
+        <a-form-item name="delimiter">
           <template #label>
             <span class="chunk-preset-label">
               分隔符
@@ -90,18 +90,6 @@ const props = defineProps({
   tempChunkParams: {
     type: Object,
     required: true
-  },
-  showQaSplit: {
-    type: Boolean,
-    default: true
-  },
-  showChunkSizeOverlap: {
-    type: Boolean,
-    default: true
-  },
-  showPreset: {
-    type: Boolean,
-    default: true
   },
   allowPresetFollowDefault: {
     type: Boolean,

@@ -645,7 +645,7 @@ watch(
 onMounted(async () => {
   loading.value = true
   store.kbId = kbId.value
-  await Promise.all([store.getKnowledgeBaseInfo(kbId.value, true), loadQuestions(), loadRuns()])
+  await Promise.all([store.getKnowledgeBaseInfo(kbId.value), loadQuestions(), loadRuns()])
   loading.value = false
 })
 onUnmounted(() => {

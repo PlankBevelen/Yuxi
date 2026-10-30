@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import pytest
-
-
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
+import pytest
+
 from yuxi.modules.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
 
 pytestmark = pytest.mark.usefixtures("milvus_graph_projection_lock")
 
@@ -123,7 +122,7 @@ def test_milvus_graph_service_process_query_result(payload, limit, exclude_chunk
 def test_milvus_graph_service_build_query_uses_requested_depth(max_depth):
     service = KnowledgeGraphService()
 
-    query = service._build_query("kb_test", "entity", limit=20, max_depth=max_depth)
+    query = service._build_query("kb_test", "entity", max_depth=max_depth)
 
     assert f"[*1..{max_depth}]" in query
     assert "nodes(path)" in query
@@ -134,7 +133,7 @@ def test_milvus_graph_service_build_query_uses_requested_depth(max_depth):
 def test_milvus_graph_service_build_query_excludes_chunks_from_entire_path():
     service = KnowledgeGraphService()
 
-    query = service._build_query("kb_test", "entity", limit=20, max_depth=3, exclude_chunk=True)
+    query = service._build_query("kb_test", "entity", max_depth=3, exclude_chunk=True)
 
     assert "NOT n:Chunk" in query
     assert "NOT path_node:Chunk" in query
@@ -252,6 +251,7 @@ async def test_delete_file_graph_initializes_vector_store_outside_event_loop(mon
     import threading
     from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
+
     import yuxi.modules.knowledge.graphs.service as module
 
     loop_thread = threading.get_ident()

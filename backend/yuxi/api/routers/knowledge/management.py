@@ -2,17 +2,14 @@
 
 import asyncio
 import os
-import textwrap
 import traceback
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from yuxi.api.dependencies.auth import get_admin_user, get_db, get_required_user
+from yuxi.api.dependencies.auth import get_admin_user, get_required_user
 from yuxi.api.dependencies.knowledge import (
     ensure_knowledge_base_permission,
     require_knowledge_base_manage,
@@ -28,10 +25,10 @@ from yuxi.modules.identity.models import User
 from yuxi.modules.identity.permissions import ResourcePermission, resolve_knowledge_base_permission
 from yuxi.modules.knowledge.base import KBNameConflictError, KBNotFoundError
 from yuxi.modules.knowledge.chunking.presets import get_chunk_preset_options, normalize_chunk_preset_id
+from yuxi.modules.knowledge.factory import KnowledgeBaseFactory
 from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
-from yuxi.modules.knowledge.read_models import KnowledgeBaseDetail
 from yuxi.modules.knowledge.runtime import knowledge_base as knowledge_base_manager
-from yuxi.modules.knowledge.services import graph_build
+from yuxi.modules.knowledge.services import administration, documents, graph_build
 from yuxi.modules.knowledge.services.document_actions import (
     submit_document_action,
     submit_pending_document_action,
@@ -39,7 +36,6 @@ from yuxi.modules.knowledge.services.document_actions import (
 from yuxi.modules.knowledge.services.uploads import stage_document
 from yuxi.modules.knowledge.utils import (
     is_minio_url,
-    parse_minio_url,
 )
 from yuxi.modules.knowledge.utils.kb_utils import PREPROCESSED_UPLOADS_KEY
 from yuxi.modules.knowledge.utils.sample_question_utils import (
@@ -47,8 +43,6 @@ from yuxi.modules.knowledge.utils.sample_question_utils import (
     get_knowledge_base_sample_questions,
 )
 from yuxi.modules.knowledge.utils.url_fetcher import fetch_url_content
-from yuxi.modules.system.options import system_options
-from yuxi.modules.workspace.services.files import read_workspace_file_bytes
 from yuxi.shared.errors import DomainError
 
 knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -201,6 +195,7 @@ async def get_accessible_knowledge_bases(current_user: User = Depends(get_requir
                 "created_by": kb.created_by,
                 "kb_type": kb.kb_type,
                 "supports_documents": knowledge_base_manager.knowledge_base_type_supports_documents(kb.kb_type),
+                "supports_document_read": KnowledgeBaseFactory.get_kb_class(kb.kb_type).supports_document_read,
             }
             for kb in knowledge_bases
         ]
@@ -434,24 +429,7 @@ async def export_knowledge_base(
     current_user: User = Depends(require_knowledge_base_read),
 ):
     """导出知识库数据"""
-    logger.debug(f"Exporting knowledge_base {kb_id} with format {format}")
-    try:
-        file_path = await knowledge_base_manager.export_data(kb_id, format=format, include_vectors=include_vectors)
-
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Exported file not found.")
-
-        media_type = media_types.get(f".{format}", "application/octet-stream")
-
-        return FileResponse(path=file_path, filename=os.path.basename(file_path), media_type=media_type)
-    except HTTPException:
-        raise
-    except NotImplementedError as e:
-        logger.warning(f"A disabled feature was accessed: {e}")
-        raise HTTPException(status_code=501, detail=str(e))
-    except Exception as e:
-        logger.error(f"导出知识库失败 {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"导出知识库失败: {e}")
+    raise HTTPException(status_code=501, detail="知识库导出暂不支持")
 
 
 # --- 知识库文档管理分组 ---
@@ -554,7 +532,7 @@ async def add_documents(
     return await register_import(
         kb_id=kb_id,
         items=items,
-        params=params,
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         import_id=import_id,
         process=True,
@@ -587,7 +565,7 @@ async def add_uploaded_documents(
     return await register_import(
         kb_id=kb_id,
         items=payload.items,
-        params=params,
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         import_id=payload.import_id,
         additional_params=config.additional_params,
@@ -610,10 +588,10 @@ async def parse_documents(
     file_ids = _validate_direct_document_action_file_ids(file_ids)
     logger.debug(f"Parse documents for kb_id {kb_id}: {file_ids} {params=}")
     kb_info = await _ensure_knowledge_base_supports_documents(kb_id, "文档解析")
-    return await _enqueue_document_action_job(
+    return await submit_document_action(
         kb_id=kb_id,
         file_ids=file_ids,
-        params=params or {},
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         kb_info=kb_info,
         action="parse",
@@ -630,9 +608,9 @@ async def parse_pending_documents(
     params = (payload.params if payload else None) or {}
     logger.debug(f"Parse pending documents for kb_id {kb_id}: {params=}")
     kb_info = await _ensure_knowledge_base_supports_documents(kb_id, "文档解析")
-    return await _enqueue_pending_document_action_job(
+    return await submit_pending_document_action(
         kb_id=kb_id,
-        params=params,
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         kb_info=kb_info,
         action="parse",
@@ -651,10 +629,10 @@ async def index_documents(
     params = params or {}
     logger.debug(f"Index documents for kb_id {kb_id}: {file_ids} {params=}")
     kb_info = await _ensure_knowledge_base_supports_documents(kb_id, "文档入库")
-    return await _enqueue_document_action_job(
+    return await submit_document_action(
         kb_id=kb_id,
         file_ids=file_ids,
-        params=params,
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         kb_info=kb_info,
         action="index",
@@ -671,9 +649,9 @@ async def index_pending_documents(
     params = (payload.params if payload else None) or {}
     logger.debug(f"Index pending documents for kb_id {kb_id}: {params=}")
     kb_info = await _ensure_knowledge_base_supports_documents(kb_id, "文档入库")
-    return await _enqueue_pending_document_action_job(
+    return await submit_pending_document_action(
         kb_id=kb_id,
-        params=params,
+        params=_ensure_document_params(params),
         operator_id=current_user.uid,
         kb_info=kb_info,
         action="index",
@@ -689,11 +667,13 @@ async def get_document_info(kb_id: str, doc_id: str, current_user: User = Depend
     try:
         info = await knowledge_base_manager.get_file_info(kb_id, doc_id)
         return info
-    except HTTPException:
+    except (HTTPException, DomainError):
         raise
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="文档不存在") from error
     except Exception as e:
         logger.error(f"Failed to get file info, {e}, {kb_id=}, {doc_id=}, {traceback.format_exc()}")
-        return {"message": "Failed to get file info", "status": "failed"}
+        raise HTTPException(status_code=500, detail="Failed to get file info") from e
 
 
 @knowledge.get("/knowledge-bases/{kb_id}/documents/{doc_id}/basic")
@@ -705,11 +685,13 @@ async def get_document_basic_info(kb_id: str, doc_id: str, current_user: User = 
     try:
         info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
         return info
-    except HTTPException:
+    except (HTTPException, DomainError):
         raise
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="文档不存在") from error
     except Exception as e:
         logger.error(f"Failed to get file basic info, {e}, {kb_id=}, {doc_id=}, {traceback.format_exc()}")
-        return {"message": "Failed to get file basic info", "status": "failed"}
+        raise HTTPException(status_code=500, detail="Failed to get file basic info") from e
 
 
 @knowledge.post("/knowledge-bases/{kb_id}/documents/{doc_id}/reparse")
@@ -760,146 +742,48 @@ async def get_document_content(kb_id: str, doc_id: str, current_user: User = Dep
         info = await knowledge_base_manager.get_file_content(kb_id, doc_id)
         info["lines"] = _strip_internal_graph_fields(info.get("lines", []))
         return info
-    except HTTPException:
+    except (HTTPException, DomainError):
         raise
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="文档不存在") from error
     except Exception as e:
         logger.error(f"Failed to get file content, {e}, {kb_id=}, {doc_id=}, {traceback.format_exc()}")
-        return {"message": "Failed to get file content", "status": "failed"}
+        raise HTTPException(status_code=500, detail="Failed to get file content") from e
 
 
 @knowledge.delete("/knowledge-bases/{kb_id}/documents/batch")
 async def batch_delete_documents(kb_id: str, file_ids: list[str] = Body(...), current_user: User = Depends(require_knowledge_base_manage)):
     """批量删除文档或文件夹"""
-    logger.debug(f"BATCH DELETE documents {file_ids} in {kb_id}")
     await _ensure_knowledge_base_supports_documents(kb_id, "批量文档删除")
-
-    deleted_count = 0
-    failed_items = []
-
-    for doc_id in file_ids:
-        try:
-            file_meta_info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
-
-            is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
-            if is_folder:
-                await knowledge_base_manager.delete_folder(kb_id, doc_id)
-                deleted_count += 1
-                continue
-
-            await knowledge_base_manager.delete_file(kb_id, doc_id)
-            deleted_count += 1
-
-        except DomainError as e:
-            failed_items.append({"doc_id": doc_id, "error": e.message})
-        except Exception as e:
-            logger.error(f"批量删除过程中删除文档 {doc_id} 失败: {e}, {traceback.format_exc()}")
-            failed_items.append({"doc_id": doc_id, "error": "删除失败，请稍后重试"})
-
-    if failed_items:
-        if deleted_count == 0:
-            raise HTTPException(status_code=400, detail=f"批量删除失败: 所有 {len(failed_items)} 个文件均未删除。")
-        return {
-            "message": f"部分删除成功: 已删除 {deleted_count} 个文件，失败 {len(failed_items)} 个",
-            "deleted_count": deleted_count,
-            "failed_items": failed_items,
-        }
-
-    return {"message": f"批量删除成功: 已删除 {deleted_count} 个文件", "deleted_count": deleted_count}
+    return await administration.batch_delete_documents(kb_id, file_ids)
 
 
 @knowledge.delete("/knowledge-bases/{kb_id}/documents/{doc_id}")
 async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(require_knowledge_base_manage)):
     """删除文档或文件夹"""
-    logger.debug(f"DELETE document {doc_id} info in {kb_id}")
     await _ensure_knowledge_base_supports_documents(kb_id, "文档删除")
     try:
-        file_meta_info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
-
-        is_folder = file_meta_info.get("meta", {}).get("is_folder", False)
-        if is_folder:
-            await knowledge_base_manager.delete_folder(kb_id, doc_id)
-            return {"message": "文件夹删除成功"}
-
-        await knowledge_base_manager.delete_file(kb_id, doc_id)
-
-        return {"message": "删除成功"}
-    except (HTTPException, DomainError):
-        raise
-    except Exception as e:
-        logger.error(f"删除文档失败 {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=400, detail=f"删除文档失败: {e}")
+        return await administration.delete_document(kb_id, doc_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=f"删除文档失败: {error}") from error
 
 
 @knowledge.get("/knowledge-bases/{kb_id}/documents/{doc_id}/download")
 async def download_document(kb_id: str, doc_id: str, current_user: User = Depends(require_knowledge_base_read)):
     """下载原始文件"""
-    logger.debug(f"Download document {doc_id} from {kb_id}")
     await _ensure_knowledge_base_supports_documents(kb_id, "文档下载")
     try:
-        file_info = await knowledge_base_manager.get_file_basic_info(kb_id, doc_id)
-        file_meta = file_info.get("meta", {})
-
-        # 获取文件类型、路径和文件名
-        file_type = file_meta.get("file_type", "file")
-        file_path = file_meta.get("path", "")
-        filename = file_meta.get("filename", "file")
-
-        # URL 类型文件没有原始文件可下载
-        if file_type == "url":
-            raise HTTPException(status_code=400, detail="URL 类型文件不支持下载原始文件")
-        logger.debug(f"File path from knowledge_base: {file_path}")
-        logger.debug(f"Original filename from knowledge_base: {filename}")
-
-        # 解码URL编码的文件名（如果有的话）
-        try:
-            decoded_filename = unquote(filename, encoding="utf-8")
-            logger.debug(f"Decoded filename: {decoded_filename}")
-        except Exception as e:
-            logger.debug(f"Failed to decode filename {filename}: {e}")
-            decoded_filename = filename  # 如果解码失败，使用原文件名
-
-        _, ext = os.path.splitext(decoded_filename)
-        media_type = media_types.get(ext.lower(), "application/octet-stream")
-
-        if not is_minio_url(file_path):
-            raise HTTPException(status_code=400, detail="文件路径必须是 MinIO URL")
-
-        logger.debug(f"Downloading from MinIO: {file_path}")
-
-        try:
-            bucket_name, object_name = parse_minio_url(file_path)
-            logger.debug(f"Parsed bucket_name: {bucket_name}, object_name: {object_name}")
-
-            minio_client = get_minio_client()
-
-            # 直接使用解析出的完整对象名称下载
-            minio_response = await minio_client.adownload_response(
-                bucket_name=bucket_name,
-                object_name=object_name,
-            )
-            logger.debug(f"Successfully downloaded object: {object_name}")
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to download MinIO file: {e}")
-            raise StorageError(f"下载文件失败: {e}") from e
-
-        response = _minio_streaming_response(minio_response, media_type=media_type)
-        try:
-            decoded_filename.encode("ascii")
-            response.headers["Content-Disposition"] = f'attachment; filename="{decoded_filename}"'
-        except UnicodeEncodeError:
-            encoded_filename = quote(decoded_filename.encode("utf-8"))
-            response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_filename}"
-
-        return response
-
-    except HTTPException:
+        source, filename, media_type = await documents.open_original_file(kb_id, doc_id)
+    except (HTTPException, DomainError):
         raise
-    except Exception as e:
-        logger.error(f"下载文件失败: {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"下载失败: {e}")
+    except Exception as error:
+        logger.exception("下载知识库原件失败")
+        raise HTTPException(status_code=500, detail="下载失败") from error
+    return _minio_streaming_response(
+        source,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"},
+    )
 
 
 @knowledge.get("/knowledge-bases/{kb_id}/images/{object_path:path}")
@@ -948,7 +832,7 @@ async def query_knowledge_base(
         raise
     except Exception as e:
         logger.error(f"知识库查询失败 {e}, {traceback.format_exc()}")
-        return {"message": "知识库查询失败，请稍后重试", "status": "failed"}
+        raise HTTPException(status_code=500, detail="知识库查询失败，请稍后重试") from e
 
 
 @knowledge.post("/knowledge-bases/{kb_id}/query-test")
@@ -1152,26 +1036,18 @@ async def import_workspace_files(
     await _require_manage_permission_if_kb_id(kb_id, current_user)
     await _ensure_knowledge_base_supports_documents(kb_id, "文档添加/解析/入库")
 
-    results = []
-    for workspace_path in paths:
-        filename, file_bytes = await read_workspace_file_bytes(
-            path=workspace_path,
-            current_user=current_user,
-        )
-        ext = os.path.splitext(filename)[1].lower()
-        if not is_supported_file_extension(filename):
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
-
-        staged = await stage_document(kb_id=kb_id, filename=filename, content=file_bytes)
-        results.append(
+    imported = await administration.import_workspace_files(kb_id, paths, current_user)
+    return {
+        "status": "success",
+        "items": [
             {
                 "message": "Workspace file successfully imported",
-                **serialize_staged_file(staged, kb_id=kb_id, filename=filename, size=len(file_bytes)),
-                "workspace_path": workspace_path,
+                **serialize_staged_file(item["staged"], kb_id=kb_id, filename=item["filename"], size=item["size"]),
+                "workspace_path": item["workspace_path"],
             }
-        )
-
-    return {"status": "success", "items": results}
+            for item in imported
+        ],
+    }
 
 
 @knowledge.post("/files/upload")
@@ -1261,56 +1137,19 @@ async def generate_description(
     current_description: str = Body("", description="当前描述（可选，用于优化）"),
     file_list: list[str] | None = Body(None, description="文件列表"),
     current_user: User = Depends(get_admin_user),
-    db: AsyncSession = Depends(get_db),
 ):
     """使用 LLM 生成或优化知识库描述
 
     根据知识库名称和现有描述，使用 LLM 生成适合作为智能体工具描述的内容。
     """
-    from yuxi.modules.models import select_model
-
-    file_list = file_list or []
-    logger.debug(f"Generating description for knowledge base: {name}, files: {len(file_list)}")
-
-    # 构建文件列表文本
-    if file_list:
-        # 限制文件数量，避免 prompt 过长
-        display_files = file_list[:50]
-        files_str = "\n".join(f"- {file_name}" for file_name in display_files)
-        more_text = f"\n... (还有 {len(file_list) - 50} 个文件)" if len(file_list) > 50 else ""
-        current_description += f"\n\n知识库包含的文件:\n{files_str}{more_text}"
-
-    current_description = current_description or "暂无描述"
-
-    # 构建提示词
-    prompt = textwrap.dedent(f"""
-        请帮我优化以下知识库的描述。
-
-        知识库名称: {name}
-        当前描述: {current_description}
-
-        要求:
-        1. 这个描述将作为智能体工具的描述使用
-        2. 智能体会根据知识库的标题和描述来选择合适的工具
-        3. 所以描述需要清晰、具体，说明该知识库包含什么内容、适合解答什么类型的问题
-        4. 描述应该简洁有力，通常 2-4 句话即可
-        5. 不要使用 Markdown 格式
-        {"6. 请参考提供的文件列表来准确概括知识库内容" if file_list else ""}
-
-        请直接输出优化后的描述，不要有任何前缀说明。
-    """).strip()
-
     try:
-        model = select_model(model_spec=(await system_options.get(db))["default_model"])
-        response = await model.call(prompt)
-        description = response.content.strip()
-        logger.debug(f"Generated description: {description}")
+        description = await administration.generate_description(name, current_description, file_list)
         return {"description": description, "status": "success"}
-    except HTTPException:
+    except (HTTPException, DomainError):
         raise
-    except Exception as e:
-        logger.error(f"生成描述失败: {e}, {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"生成描述失败: {e}")
+    except Exception as error:
+        logger.exception("生成知识库描述失败")
+        raise HTTPException(status_code=500, detail="生成描述失败") from error
 
 
 def _minio_streaming_response(minio_response, *, media_type: str, headers: dict | None = None) -> StreamingResponse:
@@ -1407,55 +1246,3 @@ def _validate_direct_document_action_file_ids(file_ids: list[str]) -> list[str]:
             detail=(f"单次最多支持 {MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS} 个文件，请使用待处理状态入口提交全量后台作业"),
         )
     return normalized_file_ids
-
-
-async def _enqueue_document_action_job(
-    *,
-    kb_id: str,
-    file_ids: list[str],
-    params: dict,
-    operator_id: str,
-    kb_info: KnowledgeBaseDetail,
-    action: str,
-) -> dict:
-    """提交管理端指定文件的解析或入库任务。"""
-    params = _ensure_document_params(params)
-    try:
-        return await submit_document_action(
-            kb_id=kb_id,
-            file_ids=file_ids,
-            params=params,
-            operator_id=operator_id,
-            kb_info=kb_info,
-            action=action,
-        )
-    except (HTTPException, DomainError):
-        raise
-    except Exception:
-        logger.exception("提交文档处理任务失败")
-        return {"message": "提交失败，请稍后重试", "status": "failed"}
-
-
-async def _enqueue_pending_document_action_job(
-    *,
-    kb_id: str,
-    params: dict,
-    operator_id: str,
-    kb_info: KnowledgeBaseDetail,
-    action: str,
-) -> dict:
-    """提交管理端按状态全量解析或入库任务。"""
-    params = _ensure_document_params(params)
-    try:
-        return await submit_pending_document_action(
-            kb_id=kb_id,
-            params=params,
-            operator_id=operator_id,
-            kb_info=kb_info,
-            action=action,
-        )
-    except (HTTPException, DomainError):
-        raise
-    except Exception:
-        logger.exception("提交文档处理任务失败")
-        return {"message": "提交失败，请稍后重试", "status": "failed"}

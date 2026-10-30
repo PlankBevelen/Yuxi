@@ -90,9 +90,6 @@
         />
         <ChunkParamsConfig
           :temp-chunk-params="indexParams"
-          :show-qa-split="true"
-          :show-chunk-size-overlap="true"
-          :show-preset="true"
           :allow-preset-follow-default="true"
           :knowledge-base-preset-id="
             store.knowledgeBase?.additional_params?.chunk_preset_id || 'general'
@@ -1133,9 +1130,7 @@ const createDefaultIndexParams = () => ({
 const indexParams = ref(createDefaultIndexParams())
 
 const buildIndexParamsPayload = () => {
-  return buildChunkParamsPayload(indexParams.value, {
-    includeSizeOverlap: true
-  })
+  return buildChunkParamsPayload(indexParams.value)
 }
 const currentIndexFileIds = ref([])
 const isBatchIndexOperation = ref(false)
@@ -1250,7 +1245,7 @@ const canBatchIndex = computed(() => {
 
 const handleRefresh = async () => {
   await Promise.all([
-    store.getKnowledgeBaseInfo(undefined, true, true),
+    store.getKnowledgeBaseInfo(undefined, true),
     store.loadDocumentFiles({ isBackground: true })
   ])
 }

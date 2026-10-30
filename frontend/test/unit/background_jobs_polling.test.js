@@ -53,7 +53,7 @@ test('任务请求时序与轮询生命周期', async (t) => {
         if (id.endsWith('/src/modules/knowledge/model/knowledgeBase.js')) return 'export const useKnowledgeBaseStore = () => ({ kbId: "test-kb", knowledgeBase: { kb_type: "milvus" } })'
         if (id.endsWith('/src/modules/background-jobs/index.js')) return 'export const useBackgroundJobsStore = () => globalThis.__graphJob.store'
         if (id.endsWith('/src/modules/settings/index.js')) return 'export const useConfigStore = () => ({})'
-        if (id.endsWith('/src/apis/graph_api.js')) return 'export const unifiedApi = {}'
+        if (id.endsWith('/src/apis/graph_api.js')) return 'export const graphApi = {}'
         if (id.endsWith('/src/apis/knowledge_api.js')) return 'export const documentApi = {}; export const graphBuildApi = new Proxy({}, { get: (_, k) => globalThis.__graphJob.api[k] })'
         if (['GraphCanvas.vue', 'FileSearchModal.vue', 'GraphDetailPanel.vue', 'ResourceEmptyState.vue', 'ModelSelectorComponent.vue'].some((name) => id.endsWith('/' + name))) return '<script>export default {}</script>'
       }

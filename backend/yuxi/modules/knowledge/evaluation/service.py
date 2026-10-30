@@ -1,7 +1,7 @@
-"""RAG 评估编排服务：数据集生命周期、评估运行调度与后台作业终态投影。
+"""RAG 评估编排服务：数据集生命周期、评估运行调度与只读进度展示。
 
 指标计算在 evaluator/metrics，逐题生成在 benchmark_generation，
-持久化在 repositories/evaluation；本模块只负责流程编排与状态投影。
+持久化在 repositories/evaluation；本模块负责流程编排，终态由后台作业事务维护。
 """
 
 from __future__ import annotations
@@ -11,13 +11,11 @@ import json
 import os
 import re
 import uuid
-from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.background_jobs.repository import BackgroundJobRepository
-from yuxi.modules.background_jobs.service import job_tracker
 from yuxi.modules.knowledge.evaluation.benchmark_generation import (
     EmptyKnowledgeBaseError,
     dump_benchmark_item,
@@ -49,11 +47,9 @@ from yuxi.modules.models import select_model
 if TYPE_CHECKING:
     from yuxi.workers.background_job_context import BackgroundJobContext
 from yuxi.modules.background_jobs.dispatch import dispatch_job, register_job_in_session
-from yuxi.shared.datetime import coerce_any_to_utc_datetime, format_utc_datetime, utc_now
+from yuxi.shared.datetime import format_utc_datetime, utc_now
 
 DATASET_PERSIST_BATCH_SIZE = max(1, int(os.getenv("YUXI_DATASET_PERSIST_BATCH_SIZE") or 1))
-# _sync_evaluation_run 的哨兵默认值：区分“调用方未查询作业”与“查询后确认无作业”
-_TASK_NOT_LOADED = object()
 
 
 class _DatasetAlreadyCompleted(RuntimeError):
@@ -422,9 +418,12 @@ class EvaluationService:
     async def list_datasets(self, kb_id: str) -> list[dict[str, Any]]:
         try:
             rows = await self.eval_repo.list_datasets(kb_id)
+            datasets = []
             for row in rows:
-                await self._sync_dataset_build_metadata(row)
-            return [self._dataset_to_dict(row) for row in rows]
+                data = self._dataset_to_dict(row)
+                data["build_metadata"] = await self._dataset_build_metadata(row)
+                datasets.append(data)
+            return datasets
         except Exception as e:
             logger.error(f"获取评估数据集列表失败: {e}")
             raise
@@ -434,7 +433,6 @@ class EvaluationService:
             row = await self.eval_repo.get_dataset(dataset_id)
             if row is None or row.kb_id != kb_id:
                 raise ValueError("Dataset not found")
-            await self._sync_dataset_build_metadata(row)
             if (row.build_metadata or {}).get("status", "completed") not in {"completed", "failed"}:
                 raise ValueError("Dataset is not ready")
 
@@ -464,7 +462,6 @@ class EvaluationService:
         row = await self.eval_repo.get_dataset(dataset_id)
         if row is None:
             raise ValueError("Dataset not found")
-        await self._sync_dataset_build_metadata(row)
         if (row.build_metadata or {}).get("status", "completed") != "completed":
             raise ValueError("Dataset is not ready")
         items = await self.eval_repo.list_all_dataset_items(dataset_id)
@@ -679,7 +676,7 @@ class EvaluationService:
 
             runs = []
             for row in rows:
-                job = await self._sync_evaluation_run(row, job_by_run_id.get(row.run_id))
+                job = job_by_run_id.get(row.run_id)
                 run = {
                     "run_id": row.run_id,
                     "name": self._run_name_from_row(row),
@@ -693,7 +690,7 @@ class EvaluationService:
                     "retrieval_config": row.retrieval_config or {},
                     "metrics": row.metrics or {},
                 }
-                if row.status == "running" and job is not None:
+                if row.status == "running" and job is not None and job.status in {"pending", "running"}:
                     run.update(progress=job.progress, message=job.message)
                 runs.append(run)
             return runs
@@ -716,7 +713,6 @@ class EvaluationService:
         if row is None or row.kb_id != kb_id:
             raise ValueError(f"Run not found for {run_id}")
 
-        await self._sync_evaluation_run(row)
         start_idx = (page - 1) * page_size
         total = await self.eval_repo.count_run_items(run_id, result_filter=result_filter)
         details = await self.eval_repo.list_run_items(run_id, start_idx, page_size, result_filter=result_filter)
@@ -750,74 +746,18 @@ class EvaluationService:
         await self.eval_repo.delete_run(run_id)
         logger.info(f"成功删除评估运行: {run_id}")
 
-    # ---------- 内部辅助：作业终态投影 ----------
+    # ---------- 内部辅助：只读进度投影 ----------
 
-    async def _sync_dataset_build_metadata(self, row) -> None:
-        """把生成作业的最新状态投影到 build_metadata；仅在内容变化时回写。"""
+    async def _dataset_build_metadata(self, row) -> dict[str, Any]:
+        """读取作业进度作为响应装饰；业务状态与关联仅由执行事务维护。"""
         metadata = dict(row.build_metadata or {})
         if metadata.get("source") != "generated" or metadata.get("status") not in {"pending", "running"}:
-            return
-
+            return metadata
         job_id = metadata.get("job_id")
         job = await self.job_repo.get_by_id(job_id) if job_id else None
-        if job is None and not job_id:
-            # job_id 断链时尝试按 payload 找回进行中的作业并回填关联
-            job = await job_tracker.find_job_by_payload(
-                job_type="dataset_generation",
-                payload_match={"dataset_id": row.dataset_id},
-                statuses={"pending", "running"},
-            )
-            if job is not None:
-                job_id = job.id
-                metadata["job_id"] = job_id
-        if job is None and not job_id:
-            return
-        if job is None:
-            metadata.pop("progress", None)
-            metadata.update(status="failed", message="生成任务不存在")
-        elif job.status == "success":
-            metadata.update(status="completed", progress=100, message=job.message or "完成")
-        elif job.status in {"failed", "cancelled"}:
-            metadata.pop("progress", None)
-            metadata.update(status="failed", message=job.error or job.message or "生成任务失败")
-        else:
-            metadata.update(status=job.status, progress=job.progress, message=job.message)
-
-        if metadata != (row.build_metadata or {}):
-            await self.eval_repo.update_dataset(row.dataset_id, {"build_metadata": metadata})
-            row.build_metadata = metadata
-
-    async def _sync_evaluation_run(self, row, job: Any = _TASK_NOT_LOADED):
-        """把 后台作业 终态投影到单条 EvaluationRun。"""
-        if row.status != "running":
-            return None
-        if job is _TASK_NOT_LOADED:
-            job = await self.job_repo.find_latest_by_payload(
-                job_type="rag_evaluation",
-                payload_match={"run_id": row.run_id},
-            )
-
-        error = None
-        completed_at = None
-        if job is not None and job.status in {"failed", "cancelled"}:
-            error = job.error or job.message or "评估任务失败"
-            completed_at = job.completed_at or utc_now()
-            if completed_at.tzinfo is None:
-                completed_at = completed_at.replace(tzinfo=UTC)
-        elif job is None and row.started_at and coerce_any_to_utc_datetime(row.started_at) < utc_now() - timedelta(minutes=1):
-            # 作业记录缺失且超过 1 分钟仍未完成：按提交中断收敛，避免运行态永久悬挂
-            error = "评估任务提交中断"
-            completed_at = utc_now()
-
-        if error is not None:
-            await self.eval_repo.update_run(
-                row.run_id,
-                {"status": "failed", "metrics": {"error": error}, "completed_at": completed_at},
-            )
-            row.status = "failed"
-            row.metrics = {"error": error}
-            row.completed_at = completed_at
-        return job
+        if job is not None and job.status in {"pending", "running"}:
+            metadata.update(progress=job.progress, message=job.message)
+        return metadata
 
     # ---------- 内部辅助：评估结果落库 ----------
 

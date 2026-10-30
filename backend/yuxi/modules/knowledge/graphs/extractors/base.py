@@ -25,7 +25,7 @@ class GraphExtractor(ABC):
         self.options = options or {}
 
     @abstractmethod
-    async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def extract(self, text: str) -> dict[str, Any]:
         """抽取单个分块，返回未归一化的原始产出，结构错误由归一化入口统一拒绝。"""
 
     def validate_options(self) -> None:

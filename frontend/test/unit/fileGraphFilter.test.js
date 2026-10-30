@@ -24,7 +24,7 @@ before(async () => {
       if (id.endsWith('/src/modules/knowledge/model/knowledgeBase.js')) return 'export const useKnowledgeBaseStore = () => globalThis.__graphTest.store'
       if (id.endsWith('/src/modules/background-jobs/index.js')) return 'export const useBackgroundJobsStore = () => ({ createJobRegistration: () => () => {} })'
       if (id.endsWith('/src/modules/settings/index.js')) return 'export const useConfigStore = () => ({})'
-      if (id.endsWith('/src/apis/graph_api.js')) return 'export const unifiedApi = { getSubgraph: (...args) => globalThis.__graphTest.getSubgraph(...args) }'
+      if (id.endsWith('/src/apis/graph_api.js')) return 'export const graphApi = { getSubgraph: (...args) => globalThis.__graphTest.getSubgraph(...args) }'
       if (id.endsWith('/src/apis/knowledge_api.js')) return 'export const graphBuildApi = new Proxy({}, { get: (_, k) => globalThis.__graphTest.graphBuildApi[k] }); export const documentApi = { getDocumentBasicInfo: async (_kb, id) => ({ file_id: id, filename: `${id}.txt` }) }'
       if (['GraphCanvas.vue', 'FileSearchModal.vue', 'GraphDetailPanel.vue', 'ResourceEmptyState.vue', 'ModelSelectorComponent.vue'].some((name) => id.endsWith('/' + name))) return '<script>export default {}</script>'
     }

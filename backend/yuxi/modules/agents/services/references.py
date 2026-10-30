@@ -272,8 +272,33 @@ def _visible_references(saved, sources, answer):
     """撤权来源不能从派生标注继续暴露，按工具消息和内容绑定身份。"""
     if not saved or saved.get("answer_hash") != _answer_hash(answer):
         return None
-    visible_keys = {(source["tool_message_id"], source["content_hash"]) for source in sources}
-    visible_sources = [source for source in saved["sources"] if (source["tool_message_id"], source["content_hash"]) in visible_keys]
+
+    def source_key(source):
+        """相同正文可以出现在多个文件或窗口，完整来源位置参与匹配。"""
+        return tuple(
+            source.get(field)
+            for field in (
+                "tool_message_id",
+                "content_hash",
+                "kind",
+                "kb_id",
+                "file_id",
+                "url",
+                "chunk_id",
+                "generation",
+                "start_line",
+                "end_line",
+                "numbered",
+            )
+        )
+
+    current_sources = {source_key(source): source for source in sources}
+    visible_sources = []
+    for source in saved["sources"]:
+        current = current_sources.get(source_key(source))
+        if current is not None:
+            # 内容身份不变时刷新当前读取能力，保留持久引用使用的来源编号。
+            visible_sources.append({**current, "id": source["id"]})
     ids = {source["id"] for source in visible_sources}
     allowed = {line["line"] for line in reference_answer_lines(answer)}
     allowed.update(index + 1 for index, line in enumerate(answer.splitlines()) if not line.strip())

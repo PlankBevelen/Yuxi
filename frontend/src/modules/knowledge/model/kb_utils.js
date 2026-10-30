@@ -64,7 +64,7 @@ export const isReadOnlyKnowledgeBase = (knowledgeBase, kbTypes = {}) => {
 
 /** 在线阅读连接器可进入详情，文档管理能力保持独立。 */
 export const supportsKnowledgeBaseDetail = (knowledgeBase) =>
-  !isReadOnlyKnowledgeBase(knowledgeBase) || knowledgeBase?.kb_type === 'feishu'
+  knowledgeBase?.supports_document_read === true
 
 export const kbUtils = {
   getKbTypeLabel,

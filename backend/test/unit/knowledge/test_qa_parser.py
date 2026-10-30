@@ -4,26 +4,9 @@
 单条 chunk 不超过 embedding 上限，且切分时保留完整问答语义。
 """
 
-import importlib.util
-from pathlib import Path
-
 import pytest
 
-_PKG = Path(__file__).resolve().parents[3]
-
-
-def _load_qa_parser():
-    """按文件路径隔离加载 qa parser；其仅依赖标准库，无需注册 sys.modules。"""
-    spec = importlib.util.spec_from_file_location(
-        "qa_parser_under_test",
-        _PKG / "yuxi/modules/knowledge/chunking/ragflow_like/parsers/qa.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-qa = _load_qa_parser()
+from yuxi.modules.knowledge.chunking.ragflow_like.parsers import qa
 
 # embedding 上下文上限的保守字符兜底（对应 bge_m3 4096 token），独立于实现常量以避免自我引用 oracle
 _EMBEDDING_CHAR_LIMIT = 4000

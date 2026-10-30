@@ -23,7 +23,6 @@ def chunk_markdown(markdown_content: str, parser_config: dict[str, Any] | None =
 
     section_texts = [text for text, _ in sections]
     nlp.remove_contents_table(sections, eng=nlp.is_english(nlp.random_choices(section_texts, k=200)))
-    nlp.make_colon_as_title(sections)
 
     bull = nlp.bullets_category([t for t in nlp.random_choices([t for t, _ in sections], k=100)])
 

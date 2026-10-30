@@ -154,7 +154,8 @@ async def test_document_action_propagates_cancellation_without_finishing(monkeyp
 
 
 @pytest.mark.parametrize("auto_index", [False, True])
-async def test_ingest_preserves_global_stages_owner_and_input_result_order(monkeypatch, auto_index):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_ingest_preserves_global_stages_owner_and_input_result_order(monkeypatch, auto_index, legacy):
     """混合失败不中断后续文件，所有阶段保持批次顺序和原输入位置。"""
     items = ["ok-a", "parse-bad", "index-bad", "ok-b"]
     context = JobContext(
@@ -165,6 +166,8 @@ async def test_ingest_preserves_global_stages_owner_and_input_result_order(monke
             "params": {"auto_index": auto_index, "chunk_preset_id": "general", "chunk_parser_config": None},
         }
     )
+    if not legacy:
+        context.payload["file_ids"] = [item["file_id"] for item in context.payload.pop("files")]
     trace = []
 
     async def parse(kb_id, file_id, **kwargs):

@@ -152,19 +152,20 @@ async def process_background_job(ctx: dict[str, Any], job_id: str) -> None:
         await _publish_pending_after_slot_release()
 
 
-async def finalize_job_failure(session, record, error: str) -> None:
-    """在 BackgroundJob 失败事务内执行已注册的领域收敛。"""
+def _failure_handler_for(record):
+    """评估作业的未知版本仍按稳定的领域身份收敛失败。"""
     try:
         definition = get_job_definition(record.type, int(record.handler_version))
     except ValueError:
-        logger.error(
-            "Cannot finalize unknown durable job: job_id=%s, type=%s, handler_version=%s",
-            record.id,
-            record.type,
-            record.handler_version,
-        )
-        return
-    handler = definition.load_failure_handler()
+        if record.type not in {"dataset_generation", "rag_evaluation"}:
+            return None
+        definition = get_job_definition(record.type)
+    return definition.load_failure_handler()
+
+
+async def finalize_job_failure(session, record, error: str) -> None:
+    """在 BackgroundJob 失败事务内执行已注册的领域收敛。"""
+    handler = _failure_handler_for(record)
     if handler is not None:
         await handler(session, record, error)
 
@@ -185,11 +186,7 @@ async def publish_pending_jobs(*, limit: int = 200) -> list[str]:
     for record in await repository.list_pending(limit=limit):
         handler_version = int(record.handler_version)
         if record.cancel_requested:
-            try:
-                failure_definition = get_job_definition(record.type, handler_version)
-            except ValueError:
-                failure_definition = None
-            failure_handler = failure_definition.load_failure_handler() if failure_definition is not None else None
+            failure_handler = _failure_handler_for(record)
             before_cancel = partial(failure_handler, error="任务已取消") if failure_handler is not None else None
             await repository.confirm_pending_cancel(record.id, before_cancel=before_cancel)
             continue
@@ -204,7 +201,9 @@ async def publish_pending_jobs(*, limit: int = 200) -> list[str]:
         except ValueError as exc:
             error = str(exc)
             logger.error("Cannot rebuild durable job: job_id=%s, type=%s", record.id, record.type)
-            await repository.fail_pending(record.id, error=error)
+            failure_handler = _failure_handler_for(record)
+            before_fail = partial(failure_handler, error=error) if failure_handler is not None else None
+            await repository.fail_pending(record.id, error=error, before_fail=before_fail)
             continue
         if not knowledge_enabled() and definition.module.startswith(KNOWLEDGE_JOB_MODULE_PREFIX):
             continue

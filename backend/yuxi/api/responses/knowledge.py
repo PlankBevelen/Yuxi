@@ -3,6 +3,7 @@
 from typing import Any
 
 from yuxi.modules.identity.permissions import ResourcePermission
+from yuxi.modules.knowledge.factory import KnowledgeBaseFactory
 from yuxi.modules.knowledge.read_models import KnowledgeBaseDetail, KnowledgeBaseSummary
 from yuxi.modules.knowledge.services.uploads import StagedDocument
 from yuxi.modules.knowledge.utils.security import redact_sensitive_params
@@ -33,6 +34,7 @@ def serialize_knowledge_base(
     redact_secrets: bool = False,
 ) -> dict[str, Any]:
     """转换单个知识库读取模型为 HTTP 响应。"""
+    kb_class = KnowledgeBaseFactory.get_kb_class(knowledge_base.kb_type)
     stats = _knowledge_base_stats(knowledge_base)
     additional_params = dict(knowledge_base.additional_params)
     if redact_secrets or knowledge_base.kb_type == "feishu":
@@ -43,6 +45,8 @@ def serialize_knowledge_base(
         "name": knowledge_base.name,
         "description": knowledge_base.description,
         "kb_type": knowledge_base.kb_type,
+        "supports_documents": kb_class.supports_documents,
+        "supports_document_read": kb_class.supports_document_read,
         "embedding_model_spec": knowledge_base.embedding_model_spec,
         "llm_model_spec": knowledge_base.llm_model_spec,
         "query_params": dict(knowledge_base.query_params),

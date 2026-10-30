@@ -30,6 +30,7 @@ from yuxi.modules.knowledge.factory import KnowledgeBaseFactory
 from yuxi.modules.knowledge.file_status import status_filter_values
 from yuxi.modules.knowledge.read_models import KnowledgeBaseConfig, KnowledgeBaseDetail, KnowledgeBaseSummary
 from yuxi.modules.knowledge.schemas import FindOutputSchema, OpenOutputSchema
+from yuxi.modules.knowledge.services import documents
 from yuxi.modules.knowledge.utils.security import redact_sensitive_params
 from yuxi.shared.datetime import utc_isoformat
 
@@ -136,21 +137,16 @@ class KnowledgeBaseManager:
         if not KnowledgeBaseFactory.is_type_supported(kb_type):
             raise KBNotFoundError(f"Unsupported knowledge base type: {kb_type}")
 
-        executor = await self._get_or_create_kb_instance(kb_type)
-        additional_params = executor.normalize_additional_params(snapshot.get("additional_params"))
+        kb_class = KnowledgeBaseFactory.get_kb_class(kb_type)
+        additional_params = kb_class.normalize_additional_params(snapshot.get("additional_params"))
         additional_params.pop("stats", None)
         return KnowledgeBaseConfig(
             kb_id=kb_id,
             kb_type=kb_type,
             embedding_model_spec=snapshot.get("embedding_model_spec"),
-            query_params=snapshot.get("query_params") or executor.get_default_query_params(kb_id),
+            query_params=snapshot.get("query_params") or kb_class.get_default_query_params(),
             additional_params=additional_params,
         )
-
-    async def get_kb_executor(self, kb_id: str) -> KnowledgeExecutor:
-        """获取知识库类型执行器。"""
-        config = await self.get_kb_config(kb_id)
-        return await self._get_or_create_kb_instance(config.kb_type)
 
     # ==== 知识库创建与更新 ====
 
@@ -186,14 +182,14 @@ class KnowledgeBaseManager:
             department_id=created_by_department_id,
         )
 
-        kb_instance = await self._get_or_create_kb_instance(kb_type)
+        kb_class = KnowledgeBaseFactory.get_kb_class(kb_type)
         additional_params = kwargs
         additional_params.setdefault("auto_generate_questions", False)
         if "reranker_config" in additional_params:
             raise ValueError("reranker_config 已移除，请在查询参数中使用 reranker_model spec")
-        additional_params = kb_instance.normalize_additional_params(additional_params)
+        additional_params = kb_class.normalize_additional_params(additional_params)
 
-        if kb_instance.requires_embedding_model:
+        if kb_class.requires_embedding_model:
             if not embedding_model_spec:
                 raise ValueError("embedding_model_spec 不能为空")
 
@@ -214,7 +210,7 @@ class KnowledgeBaseManager:
             if await kb_repo.get_by_kb_id(kb_id) is None:
                 break
 
-        query_params = kb_instance.get_default_query_params(kb_id)
+        query_params = kb_class.get_default_query_params()
         persisted_additional_params = {**additional_params, "stats": self._normalize_knowledge_base_stats(None)}
         await kb_repo.create(
             {
@@ -230,7 +226,6 @@ class KnowledgeBaseManager:
                 "created_by": created_by,
             }
         )
-        os.makedirs(os.path.join(kb_instance.work_dir, kb_id), exist_ok=True)
 
         logger.info(f"Created {kb_type} knowledge_base: {name} ({kb_id})")
         knowledge_base = await self.get_knowledge_base_info(kb_id)
@@ -509,21 +504,6 @@ class KnowledgeBaseManager:
 
     # ==== 文件写入与目录管理 ====
 
-    async def add_file_record(self, kb_id: str, item: str, params: dict | None = None, operator_id: str | None = None) -> dict:
-        """新增文件记录并刷新统计。"""
-        config = await self.get_kb_config(kb_id)
-        executor = await self._get_or_create_kb_instance(config.kb_type)
-        return await self._run_with_stats_refresh(
-            kb_id,
-            executor.add_file_record(
-                kb_id,
-                item,
-                params,
-                operator_id,
-                additional_params=config.additional_params,
-            ),
-        )
-
     async def parse_file(
         self,
         kb_id: str,
@@ -543,8 +523,8 @@ class KnowledgeBaseManager:
                 kb_id,
                 file_id,
                 operator_id,
-                additional_params=config.additional_params,
                 params=params,
+                additional_params=config.additional_params,
                 processing_job_id=processing_job_id,
                 processing_owner=processing_owner,
             ),
@@ -577,39 +557,40 @@ class KnowledgeBaseManager:
             ),
         )
 
-    async def create_folder(
-        self,
-        kb_id: str,
-        folder_name: str,
-        parent_id: str | None = None,
-        operator_id: str | None = None,
-    ) -> dict:
-        """创建文件夹并刷新统计。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await self._run_with_stats_refresh(
-            kb_id,
-            kb_instance.create_folder(kb_id, folder_name, parent_id, operator_id),
-        )
+    async def create_folder(self, kb_id: str, folder_name: str, parent_id: str | None = None, operator_id: str | None = None) -> dict:
+        """创建目录，不加载检索连接或解析配置。"""
+        from yuxi.modules.knowledge.services.directories import create_folder
+
+        await self._require_kb_supports_documents(kb_id, "创建目录")
+        return await self._run_with_stats_refresh(kb_id, create_folder(kb_id, folder_name, parent_id, operator_id))
 
     async def move_file(self, kb_id: str, file_id: str, new_parent_id: str | None) -> dict:
-        """移动文件或文件夹。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.move_file(kb_id, file_id, new_parent_id)
+        """在目录事务中移动节点。"""
+        from yuxi.modules.knowledge.services.directories import change_node
+
+        await self._require_kb_supports_documents(kb_id, "移动文档")
+        return await change_node(kb_id, file_id, parent_id=new_parent_id, move=True)
 
     async def rename_folder(self, kb_id: str, folder_id: str, folder_name: str) -> dict:
-        """重命名文件夹。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.rename_folder(kb_id, folder_id, folder_name)
+        """在目录事务中重命名文件夹。"""
+        from yuxi.modules.knowledge.services.directories import change_node
+
+        await self._require_kb_supports_documents(kb_id, "重命名目录")
+        return await change_node(kb_id, folder_id, name=folder_name)
 
     async def delete_folder(self, kb_id: str, folder_id: str) -> None:
-        """递归删除文件夹。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        await self._run_with_stats_refresh(kb_id, kb_instance.delete_folder(kb_id, folder_id))
+        """提交子树删除事实和外部清理意图。"""
+        from yuxi.modules.knowledge.services.directories import delete_folder
+
+        await self._require_kb_supports_documents(kb_id, "删除目录")
+        await self._run_with_stats_refresh(kb_id, delete_folder(kb_id, folder_id))
 
     async def delete_file(self, kb_id: str, file_id: str) -> None:
-        """删除文件。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        await self._run_with_stats_refresh(kb_id, kb_instance.delete_file(kb_id, file_id))
+        """提交文件删除事实，不要求其派生索引可用。"""
+        from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
+
+        await self._require_kb_supports_documents(kb_id, "删除文档")
+        await self._run_with_stats_refresh(kb_id, KnowledgeFileRepository().mark_deleted(kb_id=kb_id, file_id=file_id))
 
     # ==== 文件列表与读取 ====
 
@@ -805,23 +786,19 @@ class KnowledgeBaseManager:
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:
         """获取文件基本信息（仅元数据）"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.get_file_basic_info(kb_id, file_id)
+        return await documents.get_file_basic_info(kb_id, file_id)
 
     async def get_file_content(self, kb_id: str, file_id: str) -> dict:
         """获取文件内容信息（chunks和lines）"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.get_file_content(kb_id, file_id)
+        return await documents.get_file_content(kb_id, file_id)
 
     async def get_file_info(self, kb_id: str, file_id: str) -> dict:
         """获取文件完整信息（基本信息+内容信息）"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.get_file_info(kb_id, file_id)
+        return await documents.get_file_info(kb_id, file_id)
 
     async def open_file_content(self, kb_id: str, file_id: str, offset: int = 0, limit: int = 800) -> dict:
         """按行窗口打开文件解析后的 Markdown 内容"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.open_file_content(kb_id, file_id, offset, limit)
+        return await documents.open_file_content(kb_id, file_id, offset, limit)
 
     async def find_file_content(
         self,
@@ -835,8 +812,7 @@ class KnowledgeBaseManager:
         window_size: int = 80,
     ) -> dict:
         """在文件解析内容中按关键词或正则定位上下文窗口。"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.find_file_content(
+        return await documents.find_file_content(
             kb_id,
             file_id,
             patterns,
@@ -849,8 +825,7 @@ class KnowledgeBaseManager:
     async def get_file_download(self, kb_id: str, file_id: str, variant: str = "original") -> dict:
         """获取文件下载信息，仅支持文档操作的知识库可用。"""
         await self._require_kb_supports_documents(kb_id, "download")
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.get_file_download(kb_id, file_id, variant)
+        return await documents.get_file_download(kb_id, file_id, variant)
 
     # ==== 检索与文档工具入口 ====
 
@@ -873,7 +848,6 @@ class KnowledgeBaseManager:
             query,
             kb_id,
             config=config,
-            agent_call=True,
             **options,
         )
         return executor.build_search_output(kb_id, results)
@@ -881,8 +855,8 @@ class KnowledgeBaseManager:
     async def get_kb_query_params_config(self, kb_id: str) -> dict:
         """获取知识库查询参数定义，并合并当前保存值。"""
         config = await self.get_kb_config(kb_id)
-        executor = await self._get_or_create_kb_instance(config.kb_type)
-        params = executor.get_query_params_config(kb_id=kb_id)
+        kb_class = KnowledgeBaseFactory.get_kb_class(config.kb_type)
+        params = kb_class.get_query_params_config()
         for option in params.get("options", []):
             key = option.get("key")
             if key in config.query_options:
@@ -909,11 +883,18 @@ class KnowledgeBaseManager:
 
         不支持文档全文操作的知识库（如 dify 只读源）抛 ValueError。
         """
-        config = await self.get_kb_config(kb_id)
-        executor = await self._get_or_create_kb_instance(config.kb_type)
-        if not executor.supports_document_read:
-            raise ValueError("该知识库只支持检索，不支持文档查看")
-        window = await executor.open_document(kb_id, file_id, config=config, offset=offset, limit=limit)
+        kb_info, supports_documents = await self.get_knowledge_base_document_support(kb_id)
+        if kb_info is None:
+            raise KBNotFoundError(f"知识库资源 '{kb_id}' 不存在")
+        if supports_documents:
+            window = await documents.open_file_content(kb_id, file_id, offset=offset, limit=limit)
+        else:
+            kb_class = KnowledgeBaseFactory.get_kb_class(kb_info.kb_type)
+            if not kb_class.supports_document_read:
+                raise ValueError("该知识库只支持检索，不支持文档查看")
+            config = await self.get_kb_config(kb_id)
+            executor = await self._get_or_create_kb_instance(config.kb_type)
+            window = await executor.open_document(kb_id, file_id, config=config, offset=offset, limit=limit)
         return OpenOutputSchema(kb_id=kb_id, file_id=file_id, **window).model_dump()
 
     async def find_in_document(
@@ -959,11 +940,6 @@ class KnowledgeBaseManager:
 
     # ==== 运维与统计 ====
 
-    async def export_data(self, kb_id: str, format: str = "zip", **kwargs) -> str:
-        """导出知识库数据"""
-        kb_instance = await self.get_kb_executor(kb_id)
-        return await kb_instance.export_data(kb_id, format=format, **kwargs)
-
     def get_supported_kb_types(self) -> dict[str, dict]:
         """获取支持的知识库类型"""
         return KnowledgeBaseFactory.get_available_types()
@@ -979,68 +955,6 @@ class KnowledgeBaseManager:
             "kb_types": dict(Counter(row.kb_type or "milvus" for row in rows)),
             "total_files": await KnowledgeFileRepository().count_all(),
         }
-
-    async def detect_data_inconsistencies(self) -> dict:
-        """协调各类型执行器检测外部资源与主数据的不一致。"""
-        from yuxi.modules.knowledge.repositories.bases import KnowledgeBaseRepository
-
-        inconsistencies = {
-            "milvus": {"missing_collections": [], "missing_files": []},
-            "total_missing_collections": 0,
-            "total_missing_files": 0,
-        }
-        logger.info("开始检测向量数据库与元数据的一致性...")
-
-        if "milvus" in self.kb_instances:
-            try:
-                rows = await KnowledgeBaseRepository().get_all()
-                known_kb_ids = {row.kb_id for row in rows}
-                managed_kb_ids = {row.kb_id for row in rows if (row.kb_type or "milvus") == "milvus"}
-                milvus_inconsistencies = await self.kb_instances["milvus"].detect_data_inconsistencies(
-                    known_kb_ids,
-                    managed_kb_ids,
-                )
-                inconsistencies["milvus"] = milvus_inconsistencies
-                inconsistencies["total_missing_collections"] = len(milvus_inconsistencies["missing_collections"])
-                inconsistencies["total_missing_files"] = len(milvus_inconsistencies["missing_files"])
-            except Exception as e:
-                logger.error(f"检测 Milvus 数据不一致时出错: {e}")
-
-        self._log_inconsistencies(inconsistencies)
-        return inconsistencies
-
-    def _log_inconsistencies(self, inconsistencies: dict) -> None:
-        """将不一致检测结果输出到日志"""
-        total_missing_collections = inconsistencies["total_missing_collections"]
-        total_missing_files = inconsistencies["total_missing_files"]
-
-        if total_missing_collections == 0 and total_missing_files == 0:
-            logger.info("数据一致性检测完成，未发现不一致情况")
-            return
-
-        logger.warning("=" * 80)
-        logger.warning("数据一致性检测完成，发现以下不一致情况：")
-        logger.warning("=" * 80)
-
-        # Milvus 不一致情况
-        milvus_missing = inconsistencies["milvus"]["missing_collections"]
-        milvus_files_missing = inconsistencies["milvus"]["missing_files"]
-        if milvus_missing or milvus_files_missing:
-            logger.warning("Milvus 不一致情况：")
-            logger.warning(f"  缺失集合数量: {len(milvus_missing)}")
-            for collection_info in milvus_missing:
-                logger.warning(f"    - 集合: {collection_info['collection_name']}, 实体数: {collection_info['count']}")
-            logger.warning(f"  缺失文件记录数量: {len(milvus_files_missing)}")
-            for file_info in milvus_files_missing:
-                logger.warning(
-                    f"    - 知识库: {file_info['kb_id']}, 向量数: {file_info['vector_count']}, "
-                    f"元数据文件数: {file_info['metadata_files_count']}"
-                )
-
-        logger.warning("=" * 80)
-        logger.warning(f"总计：缺失集合 {total_missing_collections} 个，缺失文件记录 {total_missing_files} 个")
-        logger.warning("建议：检查这些不一致的数据，必要时进行数据清理或元数据修复")
-        logger.warning("=" * 80)
 
     # ==== 内部辅助：统计刷新与持久化 ====
 

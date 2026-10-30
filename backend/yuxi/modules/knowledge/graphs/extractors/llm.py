@@ -69,7 +69,7 @@ class LLMGraphExtractor(GraphExtractor):
                 'LLM 抽取器 model_params 不支持顶层 enable_thinking，请写在 extra_body 中，例如 {"extra_body": {"enable_thinking": false}}'
             )
 
-    async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> Any:
+    async def extract(self, text: str) -> Any:
         """抽取单个分块；返回原始 JSON 结构，形状由 normalize_extraction_result 校验。"""
         if self._model is None:
             self.validate_options()

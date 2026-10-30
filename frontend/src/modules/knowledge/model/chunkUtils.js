@@ -7,19 +7,17 @@ export const DEFAULT_CHUNK_PRESET_ID = 'general'
 export const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
 
-export const buildChunkParserConfigPayload = (source, { includeSizeOverlap = true } = {}) => {
+export const buildChunkParserConfigPayload = (source) => {
   if (!isPlainObject(source)) {
     return {}
   }
 
   const config = {}
-  if (includeSizeOverlap) {
-    if (source.chunk_token_num !== undefined && source.chunk_token_num !== null) {
-      config.chunk_token_num = source.chunk_token_num
-    }
-    if (source.overlapped_percent !== undefined && source.overlapped_percent !== null) {
-      config.overlapped_percent = source.overlapped_percent
-    }
+  if (source.chunk_token_num !== undefined && source.chunk_token_num !== null) {
+    config.chunk_token_num = source.chunk_token_num
+  }
+  if (source.overlapped_percent !== undefined && source.overlapped_percent !== null) {
+    config.overlapped_percent = source.overlapped_percent
   }
   if (source.delimiter) {
     config.delimiter = source.delimiter
@@ -28,13 +26,13 @@ export const buildChunkParserConfigPayload = (source, { includeSizeOverlap = tru
   return config
 }
 
-export const buildChunkParamsPayload = (source, options = {}) => {
+export const buildChunkParamsPayload = (source) => {
   if (!isPlainObject(source)) {
     return {}
   }
 
   const payload = {}
-  const chunkParserConfig = buildChunkParserConfigPayload(source.chunk_parser_config, options)
+  const chunkParserConfig = buildChunkParserConfigPayload(source.chunk_parser_config)
   if (Object.keys(chunkParserConfig).length > 0) {
     payload.chunk_parser_config = chunkParserConfig
   }
@@ -120,19 +118,4 @@ export function mergeChunks(chunks) {
   }
 
   return { content: currentContent, chunks: merged }
-}
-
-/**
- * 获取chunk的预览文本
- * @param {string} content - chunk内容
- * @param {number} maxLength - 最大长度
- * @returns {string} - 预览文本
- */
-export function getChunkPreview(content, maxLength = 100) {
-  if (!content) return ''
-
-  const text = content.replace(/\n+/g, ' ').trim()
-  if (text.length <= maxLength) return text
-
-  return text.slice(0, maxLength) + '...'
 }

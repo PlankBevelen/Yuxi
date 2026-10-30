@@ -1,10 +1,9 @@
 """文件入口共享 MIME 规则，调用方显式类型保留优先级。"""
 
-from types import SimpleNamespace
-
 import pytest
+
 from yuxi.infrastructure.minio.client import MinIOClient
-from yuxi.modules.knowledge.base import KnowledgeExecutor
+from yuxi.modules.knowledge.services import documents
 from yuxi.shared import files
 
 
@@ -17,7 +16,7 @@ def test_minio_upload_uses_shared_fallback_and_preserves_explicit_type(monkeypat
     class ObjectStore:
         """保存上传协议结果，作为对象内容与类型的 oracle。"""
 
-        def put_object(self, *, bucket_name, object_name, data, length, content_type, metadata=None):
+        def put_object(self, *, bucket_name, object_name, data, length, content_type, metadata=None, tags=None):
             """读取真实输入流并保存协议媒体类型。"""
             content = data.read()
             assert metadata is None
@@ -49,6 +48,8 @@ async def test_knowledge_download_uses_shared_fallback_and_preserves_metadata_ty
         assert path == source
         return b"# hello"
 
-    owner = SimpleNamespace(_load_file_meta=get_metadata, _original_file_path=lambda _meta: source, _read_minio_bytes=read_bytes)
-    result = await KnowledgeExecutor.get_file_download(owner, "kb-1", "file-1")
+    monkeypatch.setattr(documents, "load_file_meta", get_metadata)
+    monkeypatch.setattr(documents, "original_file_path", lambda _meta: source)
+    monkeypatch.setattr(documents, "read_minio_bytes", read_bytes)
+    result = await documents.get_file_download("kb-1", "file-1")
     assert result == {"filename": "report.MD", "content": b"# hello", "media_type": expected}

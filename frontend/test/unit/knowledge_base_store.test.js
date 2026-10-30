@@ -342,7 +342,7 @@ test('切库或切账号后，旧文件与统计响应不能覆盖新页面', as
             resolveFiles = resolve
           })
         const pending = Promise.all([
-          store.getKnowledgeBaseInfo(undefined, true),
+          store.getKnowledgeBaseInfo(undefined),
           store.loadDocumentFiles()
         ])
         if (change === 'knowledge-base') store.kbId = 'new-kb'
@@ -396,13 +396,13 @@ test('同库旧请求晚到不能回退入库状态，元信息不能覆盖更�
         resolveFiles = resolve
       })
     const older = Promise.all([
-      store.getKnowledgeBaseInfo(undefined, true),
+      store.getKnowledgeBaseInfo(undefined),
       store.loadDocumentFiles()
     ])
     knowledgeBaseApi.getKnowledgeBaseInfo = async () => snapshot('indexed', 70)
     documentApi.listDocuments = async () => snapshot('indexed', 70)
     await Promise.all([
-      store.getKnowledgeBaseInfo(undefined, true, true),
+      store.getKnowledgeBaseInfo(undefined, true),
       store.loadDocumentFiles({ isBackground: true })
     ])
     assert.equal(store.state.knowledgeBaseLoading, false)
@@ -418,7 +418,7 @@ test('同库旧请求晚到不能回退入库状态，元信息不能覆盖更�
       new Promise((resolve) => {
         resolveInfo = resolve
       })
-    const metadata = store.getKnowledgeBaseInfo(undefined, true)
+    const metadata = store.getKnowledgeBaseInfo(undefined)
     await store.loadDocumentFiles()
     resolveInfo(snapshot('parsed', 0))
     await metadata

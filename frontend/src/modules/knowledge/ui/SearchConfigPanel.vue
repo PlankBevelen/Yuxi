@@ -61,7 +61,6 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { useKnowledgeBaseStore } from '@/modules/knowledge/model/knowledgeBase'
 import { message } from 'ant-design-vue'
 import { queryApi } from '@/apis/knowledge_api'
 import { createSearchConfigSnapshot, searchConfigChanged } from '@/modules/knowledge/model/searchConfig'
@@ -74,8 +73,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['save'])
-
-const store = useKnowledgeBaseStore()
 
 const loading = ref(false)
 const error = ref('')
@@ -161,14 +158,15 @@ const save = async ({ notify = true } = {}) => {
   }
 
   meta.include_distances = true
+  const submitted = { ...meta }
+  const submittedConfig = getConfigSnapshot()
 
   try {
-    const response = await queryApi.updateKnowledgeBaseQueryParams(props.kbId, { ...meta })
+    const response = await queryApi.updateKnowledgeBaseQueryParams(props.kbId, submitted)
     if (response.message === 'success') {
-      Object.assign(store.meta, meta)
-      initialConfig.value = getConfigSnapshot()
+      initialConfig.value = submittedConfig
       if (notify) message.success('配置已保存')
-      emit('save', { ...meta })
+      emit('save', submitted)
       return true
     } else {
       throw new Error(response.message || '保存失败')
@@ -178,16 +176,6 @@ const save = async ({ notify = true } = {}) => {
     message.error('保存配置失败：' + (err.message || '未知错误'))
     return false
   }
-}
-
-const resetToDefaults = () => {
-  queryParams.value.forEach((param) => {
-    if (param.default !== undefined) {
-      meta[param.key] = param.default
-    }
-  })
-  meta.include_distances = true
-  message.success('已重置为默认配置')
 }
 
 watch(
@@ -200,7 +188,7 @@ watch(
   { immediate: true }
 )
 
-defineExpose({ save, resetToDefaults, loadQueryParams, hasChanges })
+defineExpose({ save, hasChanges })
 </script>
 
 <style lang="less" scoped>

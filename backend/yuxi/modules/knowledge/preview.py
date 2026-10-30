@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from yuxi.infrastructure.file_preview import prepare_file_preview, preview_too_large
+from yuxi.infrastructure.filesystem import await_io
 from yuxi.infrastructure.minio import ObjectSizeLimitError, get_minio_client
 from yuxi.infrastructure.minio.object_urls import is_minio_url, parse_minio_url
 from yuxi.infrastructure.office_conversion import (
@@ -11,6 +12,7 @@ from yuxi.infrastructure.office_conversion import (
     is_office_pdf_convertible,
 )
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
+from yuxi.modules.knowledge.repositories.projections import knowledge_projection_lock
 from yuxi.shared.files import MAX_FILE_PREVIEW_BYTES
 
 
@@ -90,26 +92,36 @@ async def _read_office_pdf_preview(
     filename: str,
     original_path: str,
 ) -> bytes:
-    """将 Office 文件转换为 PDF 并缓存到 MinIO。"""
-    minio_client = get_minio_client()
-    bucket_name = minio_client.KB_BUCKETS["parsed"]
-    object_name = f"{kb_id}/preview/{file_id}.pdf"
-    if await minio_client.astat_file(bucket_name, object_name) is not None:
-        return await minio_client.adownload_file(bucket_name, object_name)
+    """转换及缓存持有投影读锁，删除清理必须等待对象写入结束。"""
+    async with knowledge_projection_lock(kb_id, shared=True):
+        file = await KnowledgeFileRepository().get_by_file_id(file_id)
+        if file is None or file.kb_id != kb_id:
+            raise ValueError(f"File {file_id} not found")
+        minio_client = get_minio_client()
+        bucket_name = minio_client.KB_BUCKETS["parsed"]
+        object_name = f"{kb_id}/preview/{file_id}.pdf"
+        if await minio_client.astat_file(bucket_name, object_name) is not None:
+            return await minio_client.adownload_file(bucket_name, object_name)
 
-    raw_content = await _read_minio_bytes(original_path)
-    try:
-        pdf_content = await convert_office_to_pdf(filename, raw_content)
-    except OfficeConversionError as exc:
-        raise ValueError(str(exc)) from exc
+        raw_content = await _read_minio_bytes(original_path)
+        try:
+            pdf_content = await convert_office_to_pdf(filename, raw_content)
+        except OfficeConversionError as exc:
+            raise ValueError(str(exc)) from exc
 
-    await minio_client.aupload_file(
-        bucket_name=bucket_name,
-        object_name=object_name,
-        data=pdf_content,
-        content_type="application/pdf",
-    )
-    return pdf_content
+        # 转换期间允许登记 tombstone；发布前复核，排他清理仍由投影锁串行化。
+        file = await KnowledgeFileRepository().get_by_file_id(file_id)
+        if file is None or file.kb_id != kb_id:
+            raise ValueError(f"File {file_id} not found")
+        await await_io(
+            minio_client.aupload_file(
+                bucket_name=bucket_name,
+                object_name=object_name,
+                data=pdf_content,
+                content_type="application/pdf",
+            )
+        )
+        return pdf_content
 
 
 async def _get_minio_file_size(file_path: str) -> int | None:

@@ -126,7 +126,7 @@ async def test_legacy_empty_options_use_panel_defaults_and_preserve_saved_overri
     collection = FakeCollection(distance=0.1)
     kb = make_kb(collection)
     monkeypatch.setattr(milvus_module.model_cache, "get_all_specs", lambda kind: [])
-    panel = {item["key"]: item["default"] for item in kb.get_query_params_config("db")["options"]}
+    panel = {item["key"]: item["default"] for item in kb.get_query_params_config()["options"]}
     assert panel["similarity_threshold"] == 0.0
     assert panel["bm25_top_k"] == 50
     config = make_query_config()

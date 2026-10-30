@@ -10,6 +10,9 @@ from yuxi.infrastructure.minio.client import MinIOClient, UploadResult, get_mini
 from yuxi.modules.knowledge.names import normalize_name
 from yuxi.modules.knowledge.utils import calculate_content_hash
 
+STAGING_RETENTION_DAYS = 7
+STAGING_TAG = "yuxi-knowledge-staging"
+
 
 @dataclass(frozen=True, slots=True)
 class StagedDocument:
@@ -25,11 +28,16 @@ async def stage_document(*, kb_id: str | None, filename: str, content: bytes, so
     leaf = normalize_name(filename) if source == "file" else "page.html"
     extension = splitext(leaf)[1]
     object_name = f"{kb_id or 'unknown'}/upload/{uuid4().hex}/source{extension}"
-    uploaded = await get_minio_client().aupload_file(
+    client = get_minio_client()
+    await client.ensure_tag_expiration(
+        MinIOClient.KB_BUCKETS["documents"], rule_id=STAGING_TAG, tag=STAGING_TAG, days=STAGING_RETENTION_DAYS
+    )
+    uploaded = await client.aupload_file(
         bucket_name=MinIOClient.KB_BUCKETS["documents"],
         object_name=object_name,
         data=content,
         content_type="text/html" if source == "url" else None,
         metadata={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename if source == "file" else leaf, safe="")},
+        tags={STAGING_TAG: "true"},
     )
     return StagedDocument(upload=uploaded, content_hash=digest)

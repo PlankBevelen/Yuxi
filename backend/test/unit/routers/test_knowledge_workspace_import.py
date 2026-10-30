@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -17,7 +18,7 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(monkeypatc
         assert slug == "db_1"
         assert "文档添加" in operation
 
-    async def fake_upload(*, bucket_name: str, object_name: str, data: bytes, content_type, metadata=None) -> UploadResult:
+    async def fake_upload(*, bucket_name: str, object_name: str, data: bytes, content_type, metadata=None, tags=None) -> UploadResult:
         file_name = object_name
         assert bucket_name == uploads.MinIOClient.KB_BUCKETS["documents"]
         assert file_name.startswith("db_1/upload/") and file_name.endswith("/source.md")
@@ -37,8 +38,8 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(monkeypatc
         assert current_user is user
         return "note.md", b"# workspace note\n"
 
-    monkeypatch.setattr(knowledge_router, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
-    monkeypatch.setattr(uploads, "get_minio_client", lambda: SimpleNamespace(aupload_file=fake_upload))
+    monkeypatch.setattr(knowledge_router.administration, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
+    monkeypatch.setattr(uploads, "get_minio_client", lambda: SimpleNamespace(aupload_file=fake_upload, ensure_tag_expiration=AsyncMock()))
 
     result = await knowledge_router.import_workspace_files(
         knowledge_router.WorkspaceImportRequest(kb_id="db_1", paths=["/note.md"]),
@@ -67,7 +68,7 @@ async def test_import_workspace_files_rejects_directory(monkeypatch):
         "_ensure_knowledge_base_supports_documents",
         fake_ensure_knowledge_base_supports_documents,
     )
-    monkeypatch.setattr(knowledge_router, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
+    monkeypatch.setattr(knowledge_router.administration, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
 
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_router.import_workspace_files(

@@ -459,7 +459,7 @@ import FileSearchModal from '@/modules/knowledge/ui/FileSearchModal.vue'
 import GraphDetailPanel from '@/modules/knowledge/ui/GraphDetailPanel.vue'
 import ResourceEmptyState from '@/shared/ui/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/modules/knowledge/model/kb_utils'
-import { unifiedApi } from '@/apis/graph_api'
+import { graphApi } from '@/apis/graph_api'
 import { documentApi, graphBuildApi } from '@/apis/knowledge_api'
 import { Modal, message } from 'ant-design-vue'
 import ModelSelectorComponent from '@/modules/agents/ui/ModelSelectorComponent.vue'
@@ -898,7 +898,7 @@ const loadGraph = async () => {
     graphLoaded.value = false
   }
   try {
-    const res = await unifiedApi.getSubgraph({
+    const res = await graphApi.getSubgraph({
       kb_id: currentKnowledgeBaseId,
       file_id: currentFileId,
       node_label: searchInput.value || '*',

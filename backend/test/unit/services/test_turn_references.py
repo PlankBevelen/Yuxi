@@ -118,7 +118,9 @@ async def test_reference_loading_reads_knowledge_permissions_only_for_knowledge_
     """网页或空检索不发起知识库 MCP 会话，知识工具结果仍解析实时权限。"""
     from yuxi.modules.agents.services import references
 
-    listed = AsyncMock(return_value=[{"kb_id": "kb-a", "name": "A", "description": "", "supports_documents": True}])
+    listed = AsyncMock(
+        return_value=[{"kb_id": "kb-a", "name": "A", "description": "", "supports_documents": True, "supports_document_read": True}]
+    )
     retrievals = []
 
     async def list_retrievals(_turn_id):
@@ -341,3 +343,59 @@ async def test_mcp_adapter_recorded_output_preserves_reference_identity_and_span
         ("file-a", "独立证据", 10, 12)
     ]
     assert collect_reference_sources([message], set()) == []
+
+
+def test_saved_source_identity_is_preserved_while_current_capabilities_are_refreshed():
+    """旧引用保持原 ID，仅当前同消息同内容的来源可以重新投影。"""
+    from yuxi.modules.agents.services.references import _answer_hash, _visible_references
+
+    saved = {
+        "answer_hash": _answer_hash("答案"),
+        "sources": [{"id": "s-old", "tool_message_id": 1, "content_hash": "same", "supports_documents": False}],
+        "citations": [{"source_id": "s-old", "answer_start_line": 1, "answer_end_line": 1}],
+    }
+    current = [{"id": "s-new", "tool_message_id": 1, "content_hash": "same", "supports_documents": False, "supports_document_read": True}]
+    result = _visible_references(saved, current, "答案")
+    assert result["sources"][0]["id"] == "s-old"
+    assert result["sources"][0]["supports_document_read"] is True
+    assert result["citations"][0]["source_id"] == "s-old"
+    assert "supports_document_read" not in saved["sources"][0]
+    assert _visible_references(saved, [], "答案")["sources"] == []
+    assert _visible_references(saved, [{**current[0], "content_hash": "changed"}], "答案")["citations"] == []
+
+
+@pytest.mark.parametrize(
+    "other_metadata",
+    [
+        {"file_id": "file-b", "start_line": 100, "end_line": 100},
+        {"file_id": "file-a", "start_line": 100, "end_line": 100},
+        {"file_id": "file-a", "start_line": 10, "end_line": 10, "chunk_id": "chunk-b"},
+    ],
+)
+def test_saved_sources_with_identical_text_keep_distinct_file_and_window(other_metadata):
+    """同工具同正文的不同文件、窗口与分块不得互换引用身份。"""
+    from yuxi.modules.agents.services.references import _answer_hash, _visible_references
+
+    message = tool(
+        "query_kb",
+        [
+            {"content": "相同证据", "metadata": {"file_id": "file-a", "start_line": 10, "end_line": 10, "chunk_id": "chunk-a"}},
+            {"content": "相同证据", "metadata": other_metadata},
+        ],
+    )
+    original = collect_reference_sources([message], {"kb-a"})
+    assert len(original) == 2
+    saved = {
+        "answer_hash": _answer_hash("答案"),
+        "sources": original,
+        "citations": [{"source_id": source["id"], "answer_start_line": 1, "answer_end_line": 1} for source in original],
+    }
+    current = [{**source, "supports_document_read": True} for source in reversed(original)]
+    result = _visible_references(saved, current, "答案")
+    assert [(source["id"], source["file_id"], source["chunk_id"], source["start_line"]) for source in result["sources"]] == [
+        (source["id"], source["file_id"], source["chunk_id"], source["start_line"]) for source in original
+    ]
+    assert all(source["supports_document_read"] for source in result["sources"])
+    filtered = _visible_references(saved, current[:1], "答案")
+    assert [source["id"] for source in filtered["sources"]] == [original[1]["id"]]
+    assert [citation["source_id"] for citation in filtered["citations"]] == [original[1]["id"]]

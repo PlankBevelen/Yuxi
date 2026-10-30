@@ -13,10 +13,10 @@ from sqlalchemy import delete, select
 from yuxi.infrastructure.minio import get_minio_client
 from yuxi.infrastructure.minio.client import MinIOClient
 from yuxi.infrastructure.postgres.manager import pg_manager
-from yuxi.modules.knowledge.mcp.client import call_knowledge_mcp
 from yuxi.modules.identity.models import User
 from yuxi.modules.identity.repositories.users import UserRepository
 from yuxi.modules.knowledge.mcp.auth import create_knowledge_token
+from yuxi.modules.knowledge.mcp.client import call_knowledge_mcp
 from yuxi.modules.knowledge.models import KnowledgeFile
 from yuxi.shared.datetime import utc_now
 
@@ -92,6 +92,7 @@ async def test_delegation_reads_persisted_content_and_limits_selection(test_clie
     assert listed["isError"] is False, listed
     assert [item["kb_id"] for item in listed["structuredContent"]["knowledge_bases"]] == [fixture["kb_id"]]
     assert listed["structuredContent"]["knowledge_bases"][0]["supports_documents"] is True
+    assert listed["structuredContent"]["knowledge_bases"][0]["supports_document_read"] is True
     opened = await _call(test_client, token, "open_kb_document", {"kb_id": fixture["kb_id"], "file_id": fixture["file_id"]})
     assert opened["isError"] is False, opened
     assert "Delegated MCP needle" in opened["structuredContent"]["content"]
@@ -283,3 +284,31 @@ async def test_internal_mcp_does_not_send_delegate_to_environment_proxy(delegate
         assert "Delegated MCP needle" in opened["content"]
     finally:
         await pg_manager.close()
+
+
+async def test_standard_user_reads_reference_window_without_management_access(
+    test_client, admin_headers, standard_user, delegated_document
+):
+    """普通用户读取真实原文窗口，管理接口拒绝，撤权后同一读取请求拒绝。"""
+    fixture = delegated_document
+    headers = standard_user["headers"]
+    path = "/api/v1/knowledge/tools/open_kb_document"
+    payload = {"kb_id": fixture["kb_id"], "file_id": fixture["file_id"], "line": 2, "window_size": 1}
+    opened = await test_client.post(path, headers=headers, json=payload)
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["start_line"] == opened.json()["end_line"] == 2
+    assert opened.json()["content"].endswith("\tDelegated MCP needle")
+    blocked = await test_client.get(
+        f"/api/knowledge/knowledge-bases/{fixture['kb_id']}/documents/{fixture['file_id']}/basic", headers=headers
+    )
+    assert blocked.status_code == 403, blocked.text
+    owner = await test_client.get("/api/auth/me", headers=admin_headers)
+    revoked = await test_client.put(
+        f"/api/knowledge/knowledge-bases/{fixture['kb_id']}",
+        headers=admin_headers,
+        json={"name": fixture["name"], "description": "Revoked reference", "share_config": _grant(owner.json()["uid"])},
+    )
+    assert revoked.status_code == 200, revoked.text
+    denied = await test_client.post(path, headers=headers, json=payload)
+    assert denied.status_code == 404, denied.text
+    assert "Delegated MCP needle" not in denied.text

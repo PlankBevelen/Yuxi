@@ -27,7 +27,8 @@ class FakeKnowledgeBase(KnowledgeExecutor):
         """该替身返回空查询结果。"""
         return []
 
-    def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
+    @classmethod
+    def get_query_params_config(cls) -> dict:
         """提供管理器构造查询配置所需的最小值。"""
         return {"options": []}
 

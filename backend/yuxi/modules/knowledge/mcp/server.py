@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from yuxi.infrastructure.observability.logging import logger
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.identity.models import User
 from yuxi.modules.knowledge.base import KBNotFoundError
@@ -161,7 +162,10 @@ class KnowledgeMCP:
             status = 404
         except ValueError:
             status = 400
-        except Exception:
+        except Exception as exc:
+            logger.bind(component="knowledge_mcp", tool_name=name, error_type=type(exc).__name__).exception(
+                "Knowledge tool execution failed"
+            )
             # SDK 默认将异常正文返回客户端；此边界只公开稳定状态，防止底层诊断泄露。
             status = 500
         guidance = {

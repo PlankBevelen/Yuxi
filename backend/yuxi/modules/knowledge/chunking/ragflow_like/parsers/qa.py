@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import csv
 import re
 from collections.abc import Callable
 from typing import Any
 
-from yuxi.modules.knowledge.chunking.source_spans import LocatedText, SourceSpanLocator, SourceText, join_source_text
+from markdown_it import MarkdownIt
+
+from yuxi.modules.knowledge.chunking.source_spans import LocatedText, SourceText, join_source_text
 
 # ATX 标题行：group(1) 为井号层级，正文自匹配末尾起
 _HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+|$)")
@@ -15,9 +16,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+|$)")
 _QUESTION_LINE_RE = re.compile(r"^(?:Q|Question|问|问题)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
 _ANSWER_LINE_RE = re.compile(r"^(?:A|Answer|答|回答)\s*[:：]\s*(.*)$", flags=re.IGNORECASE)
 # 半段文本自带的问答标记（含中英文写法），渲染前统一剥掉
-_LABEL_PREFIX_RE = re.compile(r"^(问题|答案|回答|user|assistant|Q|A|Question|Answer|问|答)[\t:： ]+", flags=re.IGNORECASE)
-# Markdown 表格分隔行单元格，如 :--- 、---
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+_LABEL_PREFIX_RE = re.compile(r"^(问题|答案|回答|user|assistant|Q|A|Question|Answer|问|答)\s*[:：]\s*", flags=re.IGNORECASE)
 
 # QA chunk 字符数硬上限：bge_m3 等模型限制 4096 tokens，中/英/数字混合内容按保守字符数兜底。
 _QA_CHUNK_MAX_CHARS = 4000
@@ -26,19 +25,11 @@ _QA_ANSWER_PREFIXES = ("回答：", "Answer: ")
 
 
 def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str, Any] | None = None) -> list[str]:
-    """QA 分块策略：按文件后缀选择下列提取器的子集，去重后统一渲染为 问题：xxx\\t回答：yyy 文本。
+    """从统一 Markdown 中提取问答，保留来源位置并切分超长答案。
 
-    提取器全集（按优先级编号；各后缀只走其中子集，见分支行内注释）：
-    1. 行首 Q/A 前缀：按行首 Q/A 前缀切问答边界，标题行先剥 # 再匹配；`# Q:`/`# 问题:` 这类带前缀的标题被识别为问题，
-       纯 `# 标题`（无 Q/问题 前缀）仅作分节符结束当前问答对、不进答案也不作问题；``` 与 ~~~ 围栏（同标记成对）
-       圈出的代码块整体只作答案正文，块内形似 Q:/A:/标题的行不切边界。
-    2. Markdown 标题：标题作问题、标题下内容作答案；仅当 1. 整轮未命中时兜底（用于纯 `# 标题` 风格的 FAQ 文档）。
-    3. Markdown 表格：按 | 分隔两列表格作 Q/A 对；md/markdown/mdx/docx/csv/无后缀与 1./2. 叠加，
-       xlsx 在 1./2. 落空后才尝试，txt 不走表格。
-    4. 分隔符：按 tab/comma 切两列；csv 固定执行，xlsx/无后缀在前面落空时兜底，txt 中作为最高优先级先于 1.。
-    5. 1-4 全部落空时，按每两行一组兜底构成问答对。
-    6. 超长 chunk 保留问题、按段落/行逐级切分答案，避免单条超过 embedding 上下文上限。
-    7. 问题本身超限等无法保留结构时，对超长 chunk 按字符数硬切并过滤空白片段，保证单条不超上限。
+    表格文件只读取 Markdown 表体；文本文件优先读取分隔列，其他文档优先读取
+    Q/A 前缀或标题，并叠加表格问答。非表格文件在没有结构时按相邻两行兜底。
+    围栏代码保持答案正文，超长问题退回字符切分以满足 embedding 上限。
     """
     parser_config = parser_config or {}
     markdown_content = SourceText(markdown_content or "")
@@ -51,33 +42,24 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
     lines = [line for line in markdown_content.splitlines() if line.strip()]
     pairs: list[tuple[str, str]] = []
 
-    # 各分支的提取器组合按后缀分发，编号对应 docstring 中的策略步骤
-    if suffix in {".xlsx", ".xls"}:
-        # 3. 表格提取，无命中退到 4. 分隔符提取
+    # 原始格式只决定提取优先级，输入始终是已解析的 Markdown。
+    if suffix in {".xlsx", ".xls", ".csv"}:
+        # 表格来源已经过统一文档转换，只消费 Markdown 表体。
         pairs.extend(_extract_pairs_from_markdown_tables(markdown_content))
-        if not pairs:
-            delimiter = _guess_delimiter(lines)
-            pairs.extend(_extract_pairs_with_delimiter(lines, delimiter))
-    elif suffix == ".csv":
-        # 3. 表格提取与 4. 分隔符（csv 解析）固定执行
-        pairs.extend(_extract_pairs_from_markdown_tables(markdown_content))
-        _annotate_line_ranges(lines, markdown_content)
-        delimiter = "\t" if any("\t" in line for line in lines) else ","
-        pairs.extend(_extract_pairs_from_csv(lines, delimiter))
     elif suffix == ".txt":
-        # 4. 分隔符优先（兼容 Q: 问题\tA: 答案 整行格式），无命中退到 1. 行首前缀
+        # 分隔符优先（兼容 Q: 问题\tA: 答案 整行格式），无命中退到行首前缀。
         delimiter = _guess_delimiter(lines)
         pairs.extend(_extract_pairs_with_delimiter(lines, delimiter))
         if not pairs:
             pairs.extend(_extract_pairs_by_prefix(markdown_content))
     elif suffix in {".md", ".markdown", ".mdx", ".docx"}:
-        # 1. 行首前缀优先；2. 前缀未命中时标题提取兜底；3. 表格提取叠加
+        # 行首前缀优先，未命中时标题提取兜底，并叠加表格。
         pairs.extend(_extract_pairs_by_prefix(markdown_content))
         if not pairs:
             pairs.extend(_extract_pairs_from_markdown_headings(markdown_content))
         pairs.extend(_extract_pairs_from_markdown_tables(markdown_content))
     else:
-        # 1. 行首前缀 →（空）2. 标题提取兜底；3. 表格叠加；仍为空退到 4. 分隔符
+        # 前缀或标题提取后叠加表格；仍为空时再尝试分隔符。
         pairs.extend(_extract_pairs_by_prefix(markdown_content))
         if not pairs:
             pairs.extend(_extract_pairs_from_markdown_headings(markdown_content))
@@ -88,8 +70,8 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
 
     pairs = _dedupe_pairs(pairs)
 
-    if not pairs and lines:
-        # 5. 最后兜底：把内容按 2 行一组构成问答
+    if not pairs and lines and suffix not in {".xlsx", ".xls", ".csv"}:
+        # 没有结构时，把内容按 2 行一组构成问答。
         for i in range(0, len(lines), 2):
             question = lines[i]
             answer = lines[i + 1] if i + 1 < len(lines) else ""
@@ -99,7 +81,7 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
     result: list[str] = []
     for question, answer in pairs:
         chunk = _to_qa_chunk(question, answer, eng=eng)
-        # 6/7. 超长 chunk 限长：保留问题切答案，问题本身超限时整条硬切；切分片段继承原 chunk 来源区间
+        # 保留问题切分超长答案，问题本身超限时整条硬切；片段继承原 chunk 来源区间。
         parts = _split_long_qa_chunks([chunk])
         if isinstance(chunk, LocatedText):
             result.extend(LocatedText(str(part), chunk.source_range) for part in parts)
@@ -226,40 +208,32 @@ def _extract_pairs_from_markdown_headings(markdown_content: str) -> list[tuple[s
     return pairs
 
 
-def _parse_markdown_table_row(line: str) -> list[str] | None:
-    """解析 Markdown 表格行为单元格列表；无竖线、空行与分隔行返回 None。"""
-    if "|" not in line:
-        return None
-
-    text = line.strip()
-    if not text:
-        return None
-
-    if text.startswith("|"):
-        text = text[1:]
-    if text.endswith("|"):
-        text = text[:-1]
-
-    cells = [cell.strip() for cell in text.split("|")]
-    if all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell.replace(" ", "")) for cell in cells if cell):
-        return None
-
-    return cells
-
-
 def _extract_pairs_from_markdown_tables(markdown_content: str) -> list[tuple[str, str]]:
-    """表格提取：两列及以上的 Markdown 表格行，前两列作为问答对。"""
+    """读取 Markdown 表体单元格语义，以数据行范围保留重写正文的来源。"""
     pairs: list[tuple[str, str]] = []
-
-    for line in (markdown_content or "").splitlines():
-        cells = _parse_markdown_table_row(line)
-        if not cells or len(cells) < 2:
-            continue
-
-        question, answer = cells[0], cells[1]
-        if question and answer:
-            pairs.append((question, answer))
-
+    in_body = False
+    cells = []
+    row_range = None
+    for token in MarkdownIt("commonmark").enable("table").parse(markdown_content):
+        if token.type == "tbody_open":
+            in_body = True
+        elif token.type == "tbody_close":
+            in_body = False
+        elif in_body and token.type == "tr_open":
+            cells = []
+            row_range = tuple(token.map)
+        elif in_body and token.type == "inline":
+            parts = []
+            for child in token.children or []:
+                if child.type in {"softbreak", "hardbreak"} or (
+                    child.type == "html_inline" and re.fullmatch(r"<br\s*/?>", child.content, flags=re.IGNORECASE)
+                ):
+                    parts.append("\n")
+                else:
+                    parts.append(child.content)
+            cells.append("".join(parts).strip())
+        elif in_body and token.type == "tr_close" and len(cells) >= 2 and cells[0] and cells[1]:
+            pairs.append((LocatedText(cells[0], row_range), cells[1]))
     return pairs
 
 
@@ -291,51 +265,6 @@ def _extract_pairs_with_delimiter(lines: list[str], delimiter: str) -> list[tupl
         pairs.append((question, answer))
 
     return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
-
-
-def _extract_pairs_from_csv(lines: list[str], delimiter: str) -> list[tuple[str, str]]:
-    """csv 解析提取两列问答；跨行引号 record 的来源区间覆盖 reader 消费的全部原始行。"""
-    pairs: list[tuple[str, str]] = []
-    question = ""
-    answer = ""
-
-    reader = csv.reader(lines, delimiter=delimiter)
-    record_start_line = 0
-    for row in reader:
-        # csv.reader 消费的 record 可能横跨多行（引号内换行），reader.line_num 即该 record 的末行行号
-        record_lines = lines[record_start_line : reader.line_num]
-        raw_line = join_source_text(record_lines, "\n")
-        record_start_line = reader.line_num
-
-        if len(row) != 2:
-            # 列数不符的 record 并入当前答案，问题的来源区间同步扩展到该 record 末行
-            if question:
-                answer += "\n" + raw_line
-                if isinstance(question, LocatedText):
-                    question.source_range = (question.source_range[0], record_lines[-1].source_range[1])
-            continue
-
-        if question and answer:
-            pairs.append((question, answer))
-        if isinstance(raw_line, SourceText):
-            # CSV 解码删除结构引号、合并转义字符，来源属于 reader 消费的完整 record
-            question = LocatedText(row[0], (record_lines[0].source_range[0], record_lines[-1].source_range[1]))
-            answer = row[1]
-        else:
-            question, answer = row
-
-    if question:
-        pairs.append((question, answer))
-
-    return [(q.strip(), a.strip()) for q, a in pairs if q.strip()]
-
-
-def _annotate_line_ranges(lines: list[str], source: str) -> None:
-    """为每行标注 0-based 半开行号区间；CSV 提取器据此把多行 record 定位回原文。"""
-    locator = SourceSpanLocator(source)
-    for line in lines:
-        _, _, first, last = locator.locate(line)
-        line.source_range = (first - 1, last)
 
 
 def _dedupe_pairs(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:

@@ -7,6 +7,7 @@ import httpx
 
 from yuxi.modules.knowledge.implementations.read_only_connectors import ReadOnlyConnectors
 from yuxi.modules.knowledge.read_models import KnowledgeBaseConfig
+from yuxi.modules.knowledge.services import documents
 from yuxi.shared.errors import UpstreamError
 
 FEISHU_DEFAULT_TOP_K = 10
@@ -58,11 +59,11 @@ class FeishuKB(ReadOnlyConnectors):
             raise ValueError("飞书知识空间 ID 必须为数字")
         return params
 
-    def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
+    @classmethod
+    def get_query_params_config(cls) -> dict:
         """只提供原生搜索的返回数量。"""
-        del kb_id, kwargs
         return {
-            "type": self.kb_type,
+            "type": cls.kb_type,
             "options": [
                 {
                     "key": "final_top_k",
@@ -81,11 +82,10 @@ class FeishuKB(ReadOnlyConnectors):
         kb_id: str,
         *,
         config: KnowledgeBaseConfig,
-        agent_call: bool = False,
         **kwargs,
     ) -> list[dict]:
         """调用飞书 Wiki 搜索，返回文档候选而非伪造的正文片段。"""
-        del kb_id, agent_call
+        del kb_id
         query = query_text.strip()
         if not query or len(query) > 50:
             raise ValueError("飞书搜索关键词长度须为 1 到 50 个字符")
@@ -166,7 +166,7 @@ class FeishuKB(ReadOnlyConnectors):
         content = data.get("content")
         if not isinstance(content, str):
             raise ValueError("飞书正文响应缺少文本内容")
-        return self._build_open_file_window(content, offset=offset, limit=limit)
+        return documents.build_open_file_window(content, offset=offset, limit=limit)
 
     @staticmethod
     def _validate_node_id(node_id: Any) -> None:

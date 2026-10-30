@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
+
 from yuxi.modules.knowledge.manager import KnowledgeBaseManager
 
 pytestmark = pytest.mark.unit
@@ -30,11 +31,12 @@ class _FakeKnowledgeBase:
         return params or {}
 
     @staticmethod
-    def get_default_query_params(_kb_id: str):
+    def get_default_query_params():
         return {"options": {}}
 
 
 def _patch_supported_type(monkeypatch):
+    monkeypatch.setattr("yuxi.modules.knowledge.manager.KnowledgeBaseFactory.get_kb_class", lambda _: _FakeKnowledgeBase)
     monkeypatch.setattr(
         "yuxi.modules.knowledge.manager.KnowledgeBaseFactory.is_type_supported",
         classmethod(lambda cls, kb_type: kb_type == "milvus"),
@@ -88,7 +90,7 @@ async def test_retrieve_uses_cached_config_without_postgres(monkeypatch, tmp_pat
     result = await manager.retrieve("kb_1", "hello", top_k=2)
 
     assert result == {"kb_id": "kb_1", "results": [{"content": "matched"}]}
-    assert fake_kb.queries[0][:3] == ("hello", "kb_1", {"agent_call": True, "top_k": 2})
+    assert fake_kb.queries[0][:3] == ("hello", "kb_1", {"top_k": 2})
     config = fake_kb.queries[0][3]
     assert config.embedding_model_spec == "provider:embedding"
     assert config.query_options == {"top_k": 3}

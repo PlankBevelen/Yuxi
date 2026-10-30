@@ -68,6 +68,7 @@ async def resolve_parse_options(
     else:
         kwargs = await _build_processor_kwargs(db, engine_id)
 
+    resolved.pop("_ocr_processor_kwargs", None)
     return ParseOptions(ocr_engine=engine_id, processor_kwargs=kwargs, params=resolved)
 
 

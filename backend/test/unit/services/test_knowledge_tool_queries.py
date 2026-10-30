@@ -9,7 +9,7 @@ import pytest
 from yuxi.modules.knowledge.base import KnowledgeExecutor
 from yuxi.modules.knowledge.manager import KnowledgeBaseManager
 from yuxi.modules.knowledge.read_models import KnowledgeBaseDetail
-from yuxi.modules.knowledge.services import tools
+from yuxi.modules.knowledge.services import documents, tools
 
 
 async def _call_tool(tool, *, visible_kbs=None, **kwargs):
@@ -300,7 +300,7 @@ async def test_open_kb_document_reads_markdown_content_by_default_window(monkeyp
         assert file_id == "file-1"
         return _build_test_window("\n".join(lines), offset=offset, limit=limit)
 
-    monkeypatch.setattr(tools.knowledge_base, "open_file_content", _fake_open_file_content)
+    monkeypatch.setattr(documents, "open_file_content", _fake_open_file_content)
 
     result = await _call_tool(tools.open_kb_document, kb_id="db-1", file_id="file-1")
 
@@ -328,7 +328,7 @@ async def test_open_kb_document_prefers_line_over_offset(monkeypatch) -> None:
         assert file_id == "file-1"
         return _build_test_window("\n".join(lines), offset=offset, limit=limit)
 
-    monkeypatch.setattr(tools.knowledge_base, "open_file_content", _fake_open_file_content)
+    monkeypatch.setattr(documents, "open_file_content", _fake_open_file_content)
 
     result = await _call_tool(
         tools.open_kb_document,
@@ -365,7 +365,7 @@ async def test_open_kb_document_requires_markdown_content(monkeypatch) -> None:
         del kb_id, file_id, offset, limit
         raise Exception("文件 file-1 没有解析后的 Markdown 内容")
 
-    monkeypatch.setattr(tools.knowledge_base, "open_file_content", _fake_open_file_content)
+    monkeypatch.setattr(documents, "open_file_content", _fake_open_file_content)
 
     with pytest.raises(Exception, match="没有解析后的 Markdown 内容"):
         await _call_tool(tools.open_kb_document, kb_id="db-1", file_id="file-1")
@@ -577,3 +577,14 @@ async def test_search_file_id_cannot_bypass_visible_scope_or_name(monkeypatch, k
     """ID 与名称必须落在同一可见知识库内。"""
     result = await _call_tool(tools.search_file, **kwargs)
     assert "不存在或当前会话未启用" in result
+
+
+@pytest.mark.parametrize(
+    "kb_type,manage,read",
+    [("milvus", True, True), ("feishu", False, True), ("dify", False, False), ("notion", False, False)],
+)
+def test_mcp_capabilities_distinguish_document_management_from_reading(kb_type, manage, read):
+    """连接器可读原文不意味着可管理本地文件。"""
+    result = tools.list_kbs([{"kb_id": "source", "name": "source", "kb_type": kb_type}], include_capabilities=True)
+    assert result[0]["supports_documents"] is manage
+    assert result[0]["supports_document_read"] is read

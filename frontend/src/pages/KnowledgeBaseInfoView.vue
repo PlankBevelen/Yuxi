@@ -316,7 +316,7 @@
               <p class="knowledge-base-edit-tab-description">
                 调整当前知识库在检索测试和 Agent 使用时采用的参数。
               </p>
-              <SearchConfigPanel v-if="editModalVisible" ref="searchConfigPanelRef" :kb-id="kbId" />
+              <SearchConfigPanel v-if="editModalVisible" :key="kbId" ref="searchConfigPanelRef" :kb-id="kbId" />
             </div>
           </a-tab-pane>
         </a-tabs>
@@ -481,7 +481,7 @@ const refreshStatistics = async () => {
   if (refreshingStatistics.value) return
   refreshingStatistics.value = true
   try {
-    await store.getKnowledgeBaseInfo(undefined, true, true)
+    await store.getKnowledgeBaseInfo(undefined, true)
   } finally {
     refreshingStatistics.value = false
   }
@@ -612,7 +612,7 @@ watch(
     resetFileSelectionState()
     store.stopAutoRefresh()
     try {
-      await store.getKnowledgeBaseInfo(nextKbId, false)
+      await store.getKnowledgeBaseInfo(nextKbId)
       if (store.knowledgeBase?.kb_id === nextKbId && !kbUtils.supportsKnowledgeBaseDetail(store.knowledgeBase)) {
         if (route.query.action === 'edit' && canManageKnowledgeBase.value) {
           showEditModal()
@@ -704,12 +704,13 @@ const editModalTab = ref('basic')
 const editSaving = ref(false)
 const editFormRef = ref(null)
 const shareConfigFormRef = ref(null)
-const editShareConfig = ref({
+const emptyEditShareConfig = {
   version: 2,
   read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
   manage_scope: null
-})
-const editForm = reactive({
+}
+const editShareConfig = ref(structuredClone(emptyEditShareConfig))
+const emptyEditForm = {
   name: '',
   description: '',
   chunk_preset_id: DEFAULT_CHUNK_PRESET_ID,
@@ -721,6 +722,14 @@ const editForm = reactive({
   notion_token: '',
   notion_data_source_id: '',
   notion_version: '2026-03-11'
+}
+const editForm = reactive({ ...emptyEditForm })
+
+watch(kbId, () => {
+  editModalVisible.value = false
+  editSaving.value = false
+  Object.assign(editForm, emptyEditForm)
+  editShareConfig.value = structuredClone(emptyEditShareConfig)
 })
 
 const rules = {
@@ -808,11 +817,7 @@ const showEditModal = () => {
   editForm.notion_token = ''
   editForm.notion_data_source_id = knowledgeBase.value.additional_params?.notion_data_source_id || ''
   editForm.notion_version = knowledgeBase.value.additional_params?.notion_version || '2026-03-11'
-  editShareConfig.value = knowledgeBase.value.share_config || {
-    version: 2,
-    read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
-    manage_scope: null
-  }
+  editShareConfig.value = JSON.parse(JSON.stringify(knowledgeBase.value.share_config || emptyEditShareConfig))
   editModalVisible.value = true
 }
 
@@ -827,9 +832,15 @@ watch(
 )
 
 const handleEditSubmit = async () => {
+  const submittedKbId = kbId.value
+  const form = { ...editForm }
+  const shareConfig = JSON.parse(JSON.stringify(editShareConfig.value))
+  const kbType = knowledgeBase.value.kb_type
+  const searchConfigPanel = searchConfigPanelRef.value
   editSaving.value = true
   try {
     await editFormRef.value.validate()
+    if (kbId.value !== submittedKbId) return
 
     if (shareConfigFormRef.value) {
       const validation = shareConfigFormRef.value.validate()
@@ -841,75 +852,77 @@ const handleEditSubmit = async () => {
     }
 
     const updateData = {
-      name: editForm.name,
-      description: editForm.description,
+      name: form.name,
+      description: form.description,
       additional_params: {},
-      share_config: editShareConfig.value
+      share_config: shareConfig
     }
 
-    if (isDifyKb.value) {
+    if (kbType === 'dify') {
       if (
-        !editForm.dify_api_url?.trim() ||
-        !editForm.dify_token?.trim() ||
-        !editForm.dify_dataset_id?.trim()
+        !form.dify_api_url?.trim() ||
+        !form.dify_token?.trim() ||
+        !form.dify_dataset_id?.trim()
       ) {
         editModalTab.value = 'basic'
         message.error('请完整填写 Dify API URL、Token 和 Dataset ID')
         return
       }
-      if (!editForm.dify_api_url.trim().endsWith('/v1')) {
+      if (!form.dify_api_url.trim().endsWith('/v1')) {
         editModalTab.value = 'basic'
         message.error('Dify API URL 必须以 /v1 结尾')
         return
       }
       updateData.additional_params = {
-        dify_api_url: editForm.dify_api_url.trim(),
-        dify_token: editForm.dify_token.trim(),
-        dify_dataset_id: editForm.dify_dataset_id.trim()
+        dify_api_url: form.dify_api_url.trim(),
+        dify_token: form.dify_token.trim(),
+        dify_dataset_id: form.dify_dataset_id.trim()
       }
-    } else if (knowledgeBase.value.kb_type === 'feishu') {
-      if (!/^[0-9]+$/.test(editForm.feishu_space_id.trim())) {
+    } else if (kbType === 'feishu') {
+      if (!/^[0-9]+$/.test(form.feishu_space_id.trim())) {
         editModalTab.value = 'basic'
         message.error('请填写数字知识空间 ID')
         return
       }
-      updateData.additional_params = { feishu_space_id: editForm.feishu_space_id.trim() }
-      if (editForm.feishu_user_token.trim()) {
-        updateData.additional_params.feishu_user_token = editForm.feishu_user_token.trim()
+      updateData.additional_params = { feishu_space_id: form.feishu_space_id.trim() }
+      if (form.feishu_user_token.trim()) {
+        updateData.additional_params.feishu_user_token = form.feishu_user_token.trim()
       }
-    } else if (isNotionKb.value) {
-      if (!editForm.notion_data_source_id?.trim()) {
+    } else if (kbType === 'notion') {
+      if (!form.notion_data_source_id?.trim()) {
         editModalTab.value = 'basic'
         message.error('请填写 Notion Data Source ID')
         return
       }
       updateData.additional_params = {
-        notion_data_source_id: editForm.notion_data_source_id.trim(),
-        notion_version: editForm.notion_version?.trim() || '2026-03-11'
+        notion_data_source_id: form.notion_data_source_id.trim(),
+        notion_version: form.notion_version?.trim() || '2026-03-11'
       }
-      if (editForm.notion_token?.trim()) {
-        updateData.additional_params.notion_token = editForm.notion_token.trim()
+      if (form.notion_token?.trim()) {
+        updateData.additional_params.notion_token = form.notion_token.trim()
       }
     } else {
       updateData.additional_params = {
-        chunk_preset_id: editForm.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
+        chunk_preset_id: form.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
       }
     }
 
-    if (searchConfigPanelRef.value?.hasChanges?.()) {
-      const searchConfigSaved = await searchConfigPanelRef.value.save({ notify: false })
+    if (searchConfigPanel?.hasChanges?.()) {
+      const searchConfigSaved = await searchConfigPanel.save({ notify: false })
+      if (kbId.value !== submittedKbId) return
       if (searchConfigSaved === false) {
         editModalTab.value = 'retrieval'
         return
       }
     }
 
-    await store.updateKnowledgeBaseInfo(updateData)
+    await store.updateKnowledgeBaseInfo(submittedKbId, updateData)
   } catch (err) {
+    if (kbId.value !== submittedKbId) return
     editModalTab.value = 'basic'
     console.error('表单验证失败:', err)
   } finally {
-    editSaving.value = false
+    if (kbId.value === submittedKbId) editSaving.value = false
   }
 }
 

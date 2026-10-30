@@ -371,6 +371,9 @@ const generateModalOpen = ref(false)
 const runModalOpen = ref(false)
 const downloading = reactive({})
 let refreshTimer = null
+let disposed = false
+let overviewInFlight = false
+let refreshRequested = false
 
 const completedDatasets = computed(() =>
   datasets.value.filter((dataset) => getDatasetStatus(dataset) === 'completed')
@@ -423,30 +426,45 @@ const hasActiveWork = () =>
   datasets.value.some(isDatasetBuilding) || runs.value.some((run) => run.status === 'running')
 
 const stopRefreshTimer = () => {
-  if (refreshTimer) window.clearInterval(refreshTimer)
+  if (refreshTimer) window.clearTimeout(refreshTimer)
   refreshTimer = null
 }
 
 const syncRefreshTimer = () => {
-  if (!hasActiveWork()) {
+  if (disposed || !hasActiveWork()) {
     stopRefreshTimer()
     return
   }
-  if (!refreshTimer) refreshTimer = window.setInterval(() => loadOverview(true), 3000)
+  if (!refreshTimer) {
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = null
+      void loadOverview(true)
+    }, 3000)
+  }
 }
 
 const loadOverview = async (silent = false) => {
-  if (!props.kbId) return
+  if (!props.kbId || disposed) return
+  if (overviewInFlight) {
+    refreshRequested = true
+    return
+  }
+  overviewInFlight = true
+  stopRefreshTimer()
   if (!silent) {
     loading.value = true
     errorMessage.value = ''
   }
 
   try {
-    const [datasetResponse, runResponse] = await Promise.all([
+    const results = await Promise.allSettled([
       evaluationApi.listDatasets(props.kbId),
       evaluationApi.listRuns(props.kbId)
     ])
+    if (disposed) return
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
+    const [datasetResponse, runResponse] = results.map((result) => result.value)
     if (datasetResponse?.message !== 'success' || !Array.isArray(datasetResponse.data)) {
       throw new Error('评估基准数据格式错误')
     }
@@ -457,11 +475,18 @@ const loadOverview = async (silent = false) => {
     runs.value = runResponse.data
     errorMessage.value = ''
   } catch (error) {
+    if (disposed) return
     console.error('加载评估工作台失败:', error)
     if (!silent) errorMessage.value = error.message || '请稍后重试'
   } finally {
+    overviewInFlight = false
     if (!silent) loading.value = false
-    syncRefreshTimer()
+    if (refreshRequested && !disposed) {
+      refreshRequested = false
+      await loadOverview()
+    } else {
+      syncRefreshTimer()
+    }
   }
 }
 
@@ -564,7 +589,10 @@ const handleRunCreated = async () => {
 }
 
 onMounted(() => loadOverview())
-onUnmounted(stopRefreshTimer)
+onUnmounted(() => {
+  disposed = true
+  stopRefreshTimer()
+})
 
 defineExpose({ loadOverview })
 </script>

@@ -27,7 +27,10 @@ flowchart LR
     Import --> PG
     Import --> Task["PostgreSQL BackgroundJob"]
     Router -->|解析和索引| Task
-    Router -->|配置和读取| Manager
+    Router -->|元数据和本地正文| Documents["文档 service"]
+    Documents --> PG
+    Documents --> Object
+    Router -->|配置和检索| Manager
     Task --> Worker["ARQ worker"]
     Worker --> Handler["knowledge services：领域作业流程"]
     Handler --> Manager["KnowledgeBaseManager"]
@@ -55,7 +58,7 @@ flowchart LR
 
 ## 存储装配与内部边界
 
-`KnowledgeExecutor` 表示按知识库类型复用的执行器，`KnowledgeBase` ORM 表示 PostgreSQL 配置行。Manager 保留配置解析、类型选择、权限摘要和公开结果装配；文件移动、读取等转发入口负责取得当前类型执行器。`services/access.py` 拥有用户可见范围，管理路由、Public API 与 Knowledge MCP 在知识域调用该入口；Agent 通过 HTTP MCP 消费授权后的结果。
+`KnowledgeExecutor` 表示按知识库类型复用的执行器，`KnowledgeBase` ORM 表示 PostgreSQL 配置行。Manager 保留配置解析、类型选择、权限摘要和公开结果装配；文件元数据、目录、正文窗口和原件读取直接进入知识域 service/repository，不要求装配检索客户端。类型配置和查询默认值由类型类提供；解析、索引、检索及外部正文阅读才使用执行器。`services/access.py` 拥有用户可见范围，管理路由、Public API 与 Knowledge MCP 在知识域调用该入口；Agent 通过 HTTP MCP 消费授权后的结果。
 
 文档与图谱通过 `knowledge/storage/milvus.py` 装配中文正文、embedding、BM25 函数和索引。文档、实体和三元组各自保留已有列顺序及来源字段。新集合采用统一字段定义，已有集合不自动重建。Milvus 与 Neo4j 查询分别使用每事件循环 8 个线程的预算；调用方取消等待后，实际线程退出才归还容量。
 
@@ -65,9 +68,9 @@ Milvus 执行器持有 `KnowledgeGraphService`，首次图检索在线程内初�
 
 分块入口和配置位于 `chunking/dispatcher.py` 与 `chunking/presets.py`。`ragflow_like` 是借鉴 RAGFlow 思路并经过本地修改的适配实现；其中 parser 使用 Yuxi 的 `source_spans` 保留原文定位，不能按未修改的第三方 vendor 整体替换。语义分块通过 `chunk_parser_config.embed_model_id` 接收模型 spec；索引用例在未指定时注入系统 embedding 配置。缺失模型或装配故障使索引失败，不产出普通切分结果。固定输入的分块和来源范围由 parser 测试拥有。
 
-摄取 chunk 字典、PostgreSQL 行、Milvus 列数组与检索结果各自服务不同边界：dispatcher 生成内容与来源范围，Milvus 执行器明确转换为 PG 字段和向量列，检索再从 PG 补全当前可见文件来源。文件元数据、真实目录树和 HTTP 列表保持各自需要的字段，父关系来自持久化记录。运行时查询以 `MilvusRetrievalConfig` 为默认值，再叠加持久化选项和本次请求；面板使用同一默认配置。已有显式配置继续生效，未保存的阈值与 BM25 数量分别取 0.0 和 50。
+摄取 chunk 字典、PostgreSQL 行、Milvus 列数组与检索结果各自服务不同边界：dispatcher 生成内容与来源范围，Milvus 执行器明确转换为 PG 字段和向量列，检索再从 PG 补全当前可见文件来源。文件元数据、真实目录树和 HTTP 列表保持各自需要的字段，父关系来自持久化记录。运行时查询以 `MilvusRetrievalConfig` 为默认值，再叠加持久化选项和本次请求；面板使用同一默认配置。前端查询使用后端保存的选项，配置面板只拥有未保存草稿，不在查询页维护另一份运行参数。已有显式配置继续生效，未保存的阈值与 BM25 数量分别取 0.0 和 50。
 
-知识库软删除由 `KnowledgeBaseRepository.mark_deleted` 在一个事务中写入 KB、文件 tombstone 和批量 outbox，清理任务完成外部删除后调用 `purge`。评估成功/失败钩子在后台任务的 owning transaction 中调用 repository 持久化，筛选和分页由 PostgreSQL 执行。
+知识库软删除由 `KnowledgeBaseRepository.mark_deleted` 在一个事务中写入 KB、文件 tombstone 和批量 outbox，清理任务完成外部删除后调用 `purge`。评估成功/失败钩子在后台任务的 owning transaction 中调用 repository 持久化，GET 只读取业务状态并装配进度，不回写终态；筛选和分页由 PostgreSQL 执行。有标准片段的题目在检索零命中时产生零值指标，仍参与平均值和低召回筛选；历史错误得分不自动重算。
 
 ## 文档状态机
 
@@ -88,7 +91,7 @@ stateDiagram-v2
     indexing --> uploaded: 缺少 Markdown 产物
 ```
 
-`file_status.py` 拥有当前写入状态和历史读取映射。目录写入 `done`；普通文件的历史 `done` 按 `indexed`、`failed` 按 `error_indexing` 筛选，文件列表与跨库搜索使用同一映射。`parsing` 和 `indexing` 表示当前动作已经抢到执行权；没有抢到允许状态的并发请求会失败，同一文件不会由两个动作同时推进。
+`file_status.py` 拥有当前写入状态和历史读取映射。目录写入 `done`；普通文件的历史 `done` 按 `indexed`、`failed` 按 `error_indexing` 筛选，文件列表与跨库搜索使用同一映射。`parsing` 和 `indexing` 表示当前动作已经抢到执行权；处理参数和操作者在领取文件的同一事务中写入，未抢到允许状态的请求不会更改参数。结果发布按 Job → File 顺序锁定记录，核对 Job 的执行代次、未过期 lease 与文件 owner；失权 worker 不能发布新结果或覆盖新 owner。
 
 - `uploaded`：原文件和文件记录存在，尚未完成解析；
 - `parsed`：解析后的 Markdown 路径已写入文件记录；
@@ -109,7 +112,7 @@ Milvus 文件的清除图谱、重新解析和 Markdown 编辑需要 manage 权�
 | Neo4j | 图谱实体、关系和 chunk 关联 | 原文件、权限和检索排序 |
 | Redis / ARQ | BackgroundJob 投递与 worker 唤醒、知识库最小运行配置缓存 | BackgroundJob 最终状态、配置最终值、文件状态 |
 
-知识库解析先生成本地 Markdown 目录，再将图片和 Markdown 写入该文档本次解析的独占 MinIO 前缀。文件记录提交 `parsed` 与新 Markdown 路径后，服务回收旧尝试；失败或 owner 丢失只回收未发布的当前尝试，旧产物保持可读。取消发生在结果发布后的旧资源回收阶段时，已发布结果仍然有效。删除文档按文档前缀回收解析资源，其他文档的资源保留。
+知识库解析先生成本地 Markdown 目录，再将图片和 Markdown 写入该文档本次解析的独占 MinIO 前缀。文件记录提交 `parsed` 与新 Markdown 路径后，服务回收旧尝试；失败或 owner 丢失只回收未发布的当前尝试，旧产物保持可读。取消发生在结果发布后的旧资源回收阶段时，已发布结果仍然有效。删除文档按文档前缀回收解析资源和 Office 预览，其他文档的资源保留。预览转换持有共享投影锁，发布前重新检查文件有效性；删除清理取得排他锁后回收产物，避免转换在删除之后复活预览。
 
 普通解析和索引任务在领取文件的同一事务内合并并保存执行参数，竞争失败的任务不能改写胜出任务的参数。解析和索引发布按 Job → File 顺序锁定记录，取得文件锁后重新校验执行者与租约；失租任务不能更新解析指针或激活索引代次。documents 服务只负责读取有效 OCR 配置和生成解析产物，知识库状态、执行权及发布仍由知识域拥有。引擎拒绝明确截断或缺少必要结构的响应，合法空白正文与协议失败分别处理。
 
@@ -117,7 +120,7 @@ DOCX 解析在 VML 输入边界区分图片资源与空图形元数据：仅无�
 
 Milvus 索引会把 chunk 写入 PostgreSQL 和 Milvus。它不是跨存储事务：任一侧失败时会尝试补偿并把文件置为 `error_indexing`，排查时需要同时查看两侧。
 
-分块时保存 `chunk_index`、`start_line` 和 `end_line`，行号以 MinIO 保存的完整解析文本为基准，从 1 开始且包含首尾行；空行也计数，Markdown 和 TXT 使用同一规则。切片、合并与重叠携带原始字符位置，生成的标题与问答前缀不作为原文行。HTML 表格转键值对后的片段保留原表格块范围，CSV 解码后的问答及其子块保留完整 record 范围。检索从当前 active generation 的 PostgreSQL chunk 补齐行号与文件名。当前知识域 Schema 持有这些行号列，部署前提见[部署参考](../advanced/deployment.md#_3-数据库与文件目录)。
+分块时保存 `chunk_index`、`start_line` 和 `end_line`，行号以 MinIO 保存的完整解析文本为基准，从 1 开始且包含首尾行；空行也计数，Markdown 和 TXT 使用同一规则。切片、合并与重叠携带原始字符位置，生成的标题与问答前缀不作为原文行。HTML 表格转键值对后的片段保留原表格块范围；CSV 和 Excel 先由 parser 生成 Markdown 表格，QA 分块读取表体，来源范围指向持久化 Markdown 的对应表格行。CSV 首行为列名，不生成问答；XLS/XLSX 不猜测首行用途，使用空结构表头并保留全部原始行，包括未声明的首行内容。字段中的换行、竖线和 HTML 字面值由 parser 编码，QA 按 Markdown 单元格语义读取。检索从当前 active generation 的 PostgreSQL chunk 补齐行号与文件名。当前知识域 Schema 持有这些行号列，部署前提见[部署参考](../advanced/deployment.md#_3-数据库与文件目录)。
 
 文件内容接口同时返回完整解析文本与片段范围，并以 `line_location` 标明能否定位：完整原文可读、文件快照已完成入库、chunk 与该快照的 active generation 相同才可用。原文缺失、入库尚未完成、片段读取失败或读取期间代次改变时，预览显示原因并禁用高亮；失效的检索结果需重新检索。
 
@@ -125,9 +128,11 @@ Milvus 索引会把 chunk 写入 PostgreSQL 和 Milvus。它不是跨存储事�
 
 JobTracker 保存任务登记、执行方上报的进度与结果摘要，并提供管理员查询和取消请求。知识库和评估 service 拥有业务结论：导入登记分别返回成功与失败项，只为成功项登记处理作业；该作业遇到解析或入库失败会结束为失败，批量解析或索引可以执行完成并报告失败计数。进度达到 100 不决定任务终态。后台作业只展示有限资源引用和计数，完整结果从业务资源读取。
 
-普通上传、URL 抓取和工作区导入由 `knowledge/services/uploads.py` 同步暂存原件，计算内容哈希并使用独立对象键。原始名称保存在对象元数据，物理键不承载目录或展示名称；相同内容允许独立文件条目。路由校验权限、调用来源安全读取入口并适配响应；Workspace filesystem 拥有 no-follow 和有界读取，URL fetcher 拥有白名单与 SSRF 检查。
+普通上传、URL 抓取和工作区导入由 `knowledge/services/uploads.py` 同步暂存原件，计算内容哈希并使用独立对象键。原始名称保存在对象元数据，物理键不承载目录或展示名称；相同内容允许独立文件条目。路由校验权限并适配响应，知识域管理用例调用工作区来源安全读取入口；Workspace filesystem 拥有 no-follow 和有界读取，URL fetcher 拥有白名单与 SSRF 检查。
 
-`knowledge/services/imports.py` 在目录事务前回读原件及指纹、校验来源清单，每次最多登记 500 项。事务内复用或创建真实目录链、分配叶子名称、保存文件、持久导入回执及可选解析作业，提交后投递。回执绑定操作者、知识库、目标、条目及参数；显式 `import_id` 区分主动重新导入，未提供时同一暂存对象清单视为同一意图。重试返回原登记，标识对应不同请求返回 409，文件删除不清除回执。worker 使用已登记文件 ID 解析与索引，不创建额外文件。
+上传前为现有原件桶配置匹配 `yuxi-knowledge-staging=true` 的七天 MinIO 生命周期规则，只给新暂存对象加该标签，保留其他规则。正式导入复制的原件不携带暂存标签，导入成功回执可在暂存过期后重放。部署前无标签暂存对象不自动删除，需要运维先核对路径、时间和持久引用，再显式补标或清理；七天规则不覆盖这些历史对象。
+
+`knowledge/services/imports.py` 首先检查持久回执，新的导入意图在目录事务前回读原件及指纹、校验来源清单，每次最多登记 500 项。事务内复用或创建真实目录链、分配叶子名称、保存文件、持久导入回执及可选解析作业，提交后投递。回执绑定操作者、知识库、目标、条目及参数；显式 `import_id` 区分主动重新导入，未提供时同一暂存对象清单视为同一意图。重试返回原登记，标识对应不同请求返回 409，文件删除不清除回执。worker 使用已登记文件 ID 解析与索引，不创建额外文件。
 
 文件页摘要按整个知识库的有效文件聚合，目录、软删除文件、当前分页与目录筛选不改变摘要口径。逐状态计数驱动需关注菜单，失败优先于待处理和处理中，正常时隐藏入口；列表保留持久化错误文本，查看原因与重试是独立动作。文件数入口展开大小、Chunks 和 Tokens。
 
@@ -145,7 +150,7 @@ JobTracker 保存任务登记、执行方上报的进度与结果摘要，并提
 
 Knowledge MCP 服务端把工具级失败返回为错误结果，MCP adapter 转为绑定当前调用的错误 ToolMessage，审计与公开结果保留失败状态。正常检索没有命中时返回成功的空结果。服务端提供安全的错误指导语，工具失败后模型可以继续处理本轮任务。
 
-Agent 保留 `Context.knowledges` 的归一化选择：`"all"` 表示当前可读范围，数组表示固定的会话选择。知识库工具是内置 `knowledge` MCP server 提供的 MCP 工具：运行装配从该 server 的真实目录（initialize + tools/list）取得五个工具的名称、参数 Schema 与说明，每次调用经 HTTP MCP 读取数据；资源选择器和回答引用过滤也通过同一 MCP 边界读取知识库，不直接调用知识库 Manager、repository 或访问 service。选择器和引用过滤通过 `list_kbs(include_capabilities=true)` 取得 `supports_documents` 能力摘要；普通工具列表默认不返回这些附加字段。
+Agent 保留 `Context.knowledges` 的归一化选择：`"all"` 表示当前可读范围，数组表示固定的会话选择。知识库工具是内置 `knowledge` MCP server 提供的 MCP 工具：运行装配从该 server 的真实目录（initialize + tools/list）取得五个工具的名称、参数 Schema 与说明，每次调用经 HTTP MCP 读取数据；资源选择器和回答引用过滤也通过同一 MCP 边界读取知识库，不直接调用知识库 Manager、repository 或访问 service。选择器和引用过滤通过 `list_kbs(include_capabilities=true)` 取得 `supports_documents` 和 `supports_document_read` 能力摘要；普通工具列表默认不返回这些附加字段。
 
 `knowledge/mcp` 拥有内部凭据与 SDK Auth，直接从可信 Context 读取用户、会话选择和 Run 身份。通用 MCP 装配该认证对象并复用现有 loader，运行工具在每次 HTTP 出站前复查管理员策略；Knowledge Auth 签发五分钟委托 Token。Token 使用部署共享的 `JWT_SECRET_KEY` 与 `YUXI_INSTANCE_ID`，限定 `aud=yuxi-knowledge-mcp`、`purpose=agent-knowledge-read`；普通登录 JWT 不能代替委托。Token 不持久化，不放入模型参数、prompt 或工具结果，用户无需创建内部 API Key 或进行 OAuth 登录。配置和地址见[部署参考](../advanced/deployment.md#可选关闭知识库)。
 
@@ -153,7 +158,7 @@ Knowledge MCP 每个 HTTP 请求验证签名、用途、有效期和账号当前
 
 知识库工具由内置 `knowledge-base` Skill 的 `mcp_dependencies: ["knowledge"]` 门控：预加载时首轮由运行装配从内置 server 加载工具；渐进加载时在模型读取 `SKILL.md` 后由 Skills middleware 动态加载。工具职责由[工具系统](../agents/tools-system.md#知识库工具)维护，选择和激活仍受当前资源权限约束。
 
-引用消费 MCP 的结构化结果，保留知识库、文件和原文行范围；工具的文本展示块不替代该结果。知识选择器和历史引用读取按当前用户权限执行，不受 Agent 工具启停开关限制，但部署关闭时不可用。
+引用消费 MCP 的结构化结果，保留知识库、文件和原文行范围；已保存引用按同一工具消息和内容身份重投影当前来源字段，保持引用 ID。普通用户的引用阅读调用已有授权正文窗口接口，不依赖管理员文件详情。工具的文本展示块不替代该结果。知识选择器和历史引用读取按当前用户权限执行，不受 Agent 工具启停开关限制，但部署关闭时不可用。
 
 推荐顺序是：列出可见知识库 → 检索候选片段 → 用 `file_id` 打开或定位原文。五个工具的名称、参数 Schema 与结构化结果直接来自 Knowledge MCP 的目录与响应；工具级拒绝按单次调用返回服务端指导语，连接层故障由授权中间件把 `knowledge` server 标记为不可用并在本轮隐藏其工具。
 
@@ -187,7 +192,7 @@ Agent 的 `knowledges` 只能缩小用户已有权限。协作成员沿用执行
 | 维护任务 | 起点与职责 | 继续追踪 |
 | --- | --- | --- |
 | 管理配置、文件列表和检索调度 | [Manager](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/manager.py) 读取配置、查询可见性并选择 executor | repositories 拥有持久查询；base 与 implementations 拥有文件处理和具体存储操作 |
-| 暂存上传、URL 和工作区原件 | [原件暂存 service](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/services/uploads.py) 计算内容指纹并写入独立对象和原始名称元数据 | 路由校验权限、调用来源安全读取入口并适配响应；正式文件、目录、导入回执和后台作业由导入 service 登记 |
+| 暂存上传、URL 和工作区原件 | [原件暂存 service](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/services/uploads.py) 计算内容指纹并写入独立对象和原始名称元数据 | 路由校验权限并适配响应；管理用例调用工作区安全读取入口，正式文件、目录、导入回执和后台作业由导入 service 登记 |
 | 异步导入、解析、索引和图谱构建 | [知识库作业 service](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/services/background_jobs.py) 组织领域动作、进度和失败结论 | background_jobs registry/worker 拥有调度与 lease；文档处理由 Manager 分派，图谱构建直接调用 KnowledgeGraphService |
 | 删除与旧代次投影清理 | [投影清理 service](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/services/projection_cleanup.py) 定时消费持久 outbox | 清理独立于 BackgroundJobContext；事件行锁与知识库投影锁保护外部删除，提交 applied 后才完成 |
 | Agent 知识能力与委托 | [Knowledge 客户端](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/mcp/client.py) 提供内部认证连接与产品读取；[Knowledge MCP 服务端](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/knowledge/mcp/server.py) 验证身份、选择范围与工具权限 | 访问 service 查询实时可见性；工具 service 校验目标并组织领域操作 |

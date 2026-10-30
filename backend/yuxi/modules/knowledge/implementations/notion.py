@@ -249,11 +249,9 @@ class NotionKB(ReadOnlyConnectors):
         kb_id: str,
         *,
         config: KnowledgeBaseConfig,
-        agent_call: bool = False,
         **kwargs,
     ) -> list[dict]:
         """混合 Notion 搜索与 Data Source 扫描获取候选，本地重排后读取全文并返回片段。"""
-        del agent_call
         try:
             token, data_source_id, notion_version = self._get_connection_config(kb_id, config.additional_params)
             # 默认值与上下限和 get_query_params_config 保持一致
@@ -298,9 +296,9 @@ class NotionKB(ReadOnlyConnectors):
             logger.error(f"Notion query failed for kb_id={kb_id}: {exc}, {traceback.format_exc()}")
             raise RuntimeError(f"Notion query failed for kb_id={kb_id}") from exc
 
-    def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
+    @classmethod
+    def get_query_params_config(cls) -> dict:
         """声明检索参数；默认值与 aquery 的兜底取值保持一致。"""
-        del kb_id, kwargs
         return {
             "type": "notion",
             "options": [

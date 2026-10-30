@@ -15,29 +15,6 @@ if not math.isfinite(BACKGROUND_JOB_DEFAULT_TIMEOUT_SECONDS) or BACKGROUND_JOB_D
     raise ValueError("BackgroundJob timeout must be a positive finite number of seconds")
 
 
-async def submit_job(
-    *,
-    name: str,
-    job_type: str,
-    payload: dict[str, Any] | None = None,
-    payload_match: dict[str, Any] | None = None,
-    timeout_seconds: float | None = None,
-) -> tuple[BackgroundJobRecord, bool]:
-    """登记 worker 动作，并在数据库提交后投递新建任务。"""
-    definition = get_job_definition(job_type)
-    job, created = await job_tracker.register(
-        name=name,
-        job_type=job_type,
-        payload=payload or {},
-        payload_match=payload_match,
-        handler_version=definition.version,
-        timeout_seconds=resolve_job_timeout(timeout_seconds),
-    )
-    if created:
-        await dispatch_job(job.id)
-    return job, created
-
-
 async def register_job_in_session(
     session,
     *,

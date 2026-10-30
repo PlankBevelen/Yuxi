@@ -4,7 +4,6 @@ import pytest
 from fastapi import HTTPException
 
 from yuxi.api.routers.knowledge.evaluation import get_evaluation_run_results
-from yuxi.modules.knowledge.evaluation import service as evaluation_module
 from yuxi.modules.knowledge.evaluation.service import EvaluationService
 
 
@@ -37,9 +36,9 @@ async def test_run_results_reject_missing_or_foreign_run_even_with_matching_job(
         """制造可触发旧兜底的同名后台作业。"""
         return {"id": job_id, "status": "running", "progress": 50, "message": "private job"}
 
-    monkeypatch.setattr(evaluation_module.job_tracker, "get_job", matching_job)
     service = EvaluationService.__new__(EvaluationService)
     service.eval_repo = RunRepository()
+    service.job_repo = SimpleNamespace(get_by_id=matching_job)
 
     with pytest.raises(ValueError, match="Run not found"):
         await service.get_run_results("kb_test", "run_1234abcd")

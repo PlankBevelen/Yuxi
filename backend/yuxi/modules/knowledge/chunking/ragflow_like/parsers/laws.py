@@ -37,7 +37,6 @@ def chunk_markdown(filename: str, markdown_content: str, parser_config: dict[str
 
     nlp.remove_contents_table(sections, eng=nlp.is_english(sections))
     typed_sections = [(s, "") for s in sections]
-    nlp.make_colon_as_title(typed_sections)
 
     bull = nlp.bullets_category([s for s, _ in typed_sections])
     if bull == nlp.MARKDOWN_BULLET_GROUP_INDEX:

@@ -26,7 +26,7 @@ async def test_url_response_preserves_original_and_redirected_names(monkeypatch)
         return UploadResult("http://minio/html", kwargs["bucket_name"], kwargs["object_name"])
 
     monkeypatch.setattr(router, "fetch_url_content", AsyncMock(return_value=(content, final)))
-    monkeypatch.setattr(uploads, "get_minio_client", lambda: SimpleNamespace(aupload_file=upload))
+    monkeypatch.setattr(uploads, "get_minio_client", lambda: SimpleNamespace(aupload_file=upload, ensure_tag_expiration=AsyncMock()))
     result = await router.fetch_url(original, kb_id=None, current_user=SimpleNamespace(uid="user"))
     assert result == {
         "status": "success",
@@ -44,4 +44,5 @@ async def test_url_response_preserves_original_and_redirected_names(monkeypatch)
         "data": content,
         "content_type": "text/html",
         "metadata": {"Content-Disposition": "attachment; filename*=UTF-8''page.html"},
+        "tags": {uploads.STAGING_TAG: "true"},
     }

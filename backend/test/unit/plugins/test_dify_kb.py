@@ -45,11 +45,17 @@ class _FakeAsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_dify_rejects_folder_rename(tmp_path):
-    kb = DifyKB(str(tmp_path))
+async def test_dify_rejects_folder_rename(tmp_path, monkeypatch):
+    from types import SimpleNamespace
 
-    with pytest.raises(ValueError, match="只读检索连接器不支持该操作"):
-        await kb.rename_folder("kb-1", "folder-1", "renamed")
+    from yuxi.modules.knowledge.manager import KnowledgeBaseManager
+
+    manager = KnowledgeBaseManager(str(tmp_path))
+    monkeypatch.setattr(
+        manager, "get_knowledge_base_document_support", AsyncMock(return_value=(SimpleNamespace(kb_type="dify", name="Dify"), False))
+    )
+    with pytest.raises(ValueError, match="只支持检索"):
+        await manager.rename_folder("kb-1", "folder-1", "renamed")
 
 
 def test_dify_create_params_config_and_validation():

@@ -64,7 +64,7 @@ const location = computed(() => {
 })
 const openLabel = computed(() => {
   if (citation.value.source.kind === 'web') return '打开网页'
-  return citation.value.source.supports_documents && citation.value.source.file_id ? '查看原文' : '查看片段'
+  return citation.value.source.supports_document_read && citation.value.source.file_id ? '查看原文' : '查看片段'
 })
 
 /** 将预览卡片放在胶囊附近，并限制在当前视口内。 */

@@ -12,7 +12,9 @@ from urllib.parse import quote, urlsplit
 from urllib3 import BaseHTTPResponse
 
 from minio import Minio
+from minio.commonconfig import ENABLED, Filter, Tag, Tags
 from minio.error import S3Error
+from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.shared.files import detect_media_type
 
@@ -131,6 +133,7 @@ class MinIOClient:
         data: bytes,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
     ) -> UploadResult:
         """上传字节到指定对象并返回访问地址。"""
         try:
@@ -138,6 +141,8 @@ class MinIOClient:
 
             resolved_content_type = content_type or detect_media_type(object_name)
             data_stream = BytesIO(data)
+            object_tags = Tags.new_object_tags()
+            object_tags.update(tags or {})
             self.client.put_object(
                 bucket_name=bucket_name,
                 object_name=object_name,
@@ -145,6 +150,7 @@ class MinIOClient:
                 length=len(data),
                 content_type=resolved_content_type,
                 metadata=metadata,
+                tags=object_tags if tags else None,
             )
 
             if bucket_name in self.PUBLIC_READ_BUCKETS:
@@ -166,6 +172,7 @@ class MinIOClient:
         data: bytes,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
     ) -> UploadResult:
         """在线程内上传字节及可选对象元数据。"""
         return await asyncio.to_thread(
@@ -175,7 +182,24 @@ class MinIOClient:
             data=data,
             content_type=content_type,
             metadata=metadata,
+            tags=tags,
         )
+
+    async def ensure_tag_expiration(self, bucket_name: str, *, rule_id: str, tag: str, days: int) -> None:
+        """按对象标签配置过期规则，只替换调用方拥有的规则并保留其他策略。"""
+
+        def configure() -> None:
+            """读取并合并 S3 生命周期，配置失败时阻止暂存写入。"""
+            self.ensure_bucket_exists(bucket_name)
+            rule = Rule(ENABLED, rule_filter=Filter(tag=Tag(tag, "true")), rule_id=rule_id, expiration=Expiration(days=days))
+            config = self.client.get_bucket_lifecycle(bucket_name)
+            rules = list(config.rules) if config is not None else []
+            if rule in rules:
+                return
+            rules = [existing for existing in rules if existing.rule_id != rule_id]
+            self.client.set_bucket_lifecycle(bucket_name, LifecycleConfig([*rules, rule]))
+
+        await asyncio.to_thread(configure)
 
     async def object_metadata(self, bucket_name: str, object_name: str) -> dict[str, str]:
         """回读对象来源元数据，不从物理键猜测逻辑文件名。"""

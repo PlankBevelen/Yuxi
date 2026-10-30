@@ -28,6 +28,7 @@ from yuxi.modules.knowledge.chunking.ragflow_like.nlp import count_tokens
 from yuxi.modules.knowledge.read_models import KnowledgeBaseConfig
 from yuxi.modules.knowledge.repositories.chunks import KnowledgeChunkRepository
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
+from yuxi.modules.knowledge.services import documents
 from yuxi.modules.knowledge.storage.milvus import (
     CONTENT_SPARSE_FIELD,
     VECTOR_METRIC_TYPE,
@@ -39,7 +40,6 @@ from yuxi.modules.knowledge.storage.milvus import (
 from yuxi.modules.knowledge.storage.offload import run_milvus_query_io
 from yuxi.modules.models.providers.cache import model_cache
 from yuxi.modules.system.options import system_options
-from yuxi.shared.datetime import utc_isoformat
 from yuxi.shared.hashing import hashstr
 
 MILVUS_CHUNK_EMBED_BATCH_SIZE = 200
@@ -324,7 +324,6 @@ class MilvusKB(KnowledgeExecutor):
         kb_id: str,
         *,
         config: KnowledgeBaseConfig,
-        agent_call: bool = False,
         **kwargs,
     ) -> list[dict]:
         """异步查询知识库"""
@@ -538,7 +537,8 @@ class MilvusKB(KnowledgeExecutor):
             logger.error(f"Milvus query error: {e}, {traceback.format_exc()}")
             raise
 
-    def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
+    @classmethod
+    def get_query_params_config(cls) -> dict:
         """获取 Milvus 知识库的查询参数配置"""
         return {"type": "milvus", "options": _retrieval_config_options()}
 
@@ -592,52 +592,6 @@ class MilvusKB(KnowledgeExecutor):
         await await_io(asyncio.to_thread(delete_milvus_collections))
 
         return await super().cleanup_knowledge_base_resources(kb_id)
-
-    async def detect_data_inconsistencies(
-        self,
-        known_kb_ids: set[str],
-        managed_kb_ids: set[str],
-    ) -> dict[str, list[dict]]:
-        """检测 Milvus 集合与知识库元数据之间的不一致。"""
-        inconsistencies: dict[str, list[dict]] = {"missing_collections": [], "missing_files": []}
-        try:
-            collection_names = set(utility.list_collections(using=self.connection_alias))
-            for collection_name in collection_names:
-                if not collection_name.startswith("kb_") or collection_name in known_kb_ids:
-                    continue
-
-                collection_info = {"collection_name": collection_name, "detected_at": utc_isoformat()}
-                try:
-                    collection = Collection(name=collection_name, using=self.connection_alias)
-                    collection_info["count"] = collection.num_entities
-                    collection_info["description"] = collection.description
-                except Exception as exc:
-                    logger.warning(f"无法获取集合 {collection_name} 的详细信息: {exc}")
-                    collection_info["count"] = "unknown"
-                inconsistencies["missing_collections"].append(collection_info)
-
-            file_repo = KnowledgeFileRepository()
-            for kb_id in managed_kb_ids:
-                try:
-                    if not utility.has_collection(kb_id, using=self.connection_alias):
-                        continue
-                    collection = Collection(name=kb_id, using=self.connection_alias)
-                    file_count = (await file_repo.get_kb_file_stats(kb_id))["file_count"]
-                    if collection.num_entities > 0 and file_count == 0:
-                        inconsistencies["missing_files"].append(
-                            {
-                                "kb_id": kb_id,
-                                "vector_count": collection.num_entities,
-                                "metadata_files_count": file_count,
-                                "detected_at": utc_isoformat(),
-                            }
-                        )
-                except Exception as exc:
-                    logger.debug(f"检查知识库 {kb_id} 的文件一致性时出错: {exc}")
-        except Exception as exc:
-            logger.error(f"检测 Milvus 数据不一致时出错: {exc}")
-
-        return inconsistencies
 
     # ==== 内部辅助：连接与集合管理 ====
 
@@ -779,7 +733,7 @@ class MilvusKB(KnowledgeExecutor):
         processing_owner: str | None = None,
     ) -> dict:
         """索引已解析文件（状态 INDEXING → INDEXED/ERROR_INDEXING）。"""
-        await self._load_file_meta(kb_id, file_id)
+        await documents.load_file_meta(kb_id, file_id)
         # 在投影锁内先检查 PG 可见事实，删除后不能重新创建外部集合。
         collection = await self._get_or_create_milvus_collection(kb_id, embedding_model_spec)
         if not collection:
@@ -817,15 +771,15 @@ class MilvusKB(KnowledgeExecutor):
             kb_additional_params=additional_params,
         )
         if claimed_record is None:
-            current_meta = await self._load_file_meta(kb_id, file_id)
+            current_meta = await documents.load_file_meta(kb_id, file_id)
             current_status = current_meta.get("status")
             raise ValueError(
                 f"Cannot index file with status '{current_status}'. File must be parsed first "
                 f"(status should be one of: {', '.join(allowed_statuses)})"
             )
 
-        file_meta = self.file_record_to_meta(claimed_record)
-        params = file_meta["processing_params"]
+        file_meta = documents.file_record_to_meta(claimed_record)
+        params = dict(file_meta.get("processing_params") or {})
         if not file_meta.get("markdown_file"):
             reset_data = {
                 "status": FileStatus.UPLOADED,
@@ -852,7 +806,7 @@ class MilvusKB(KnowledgeExecutor):
             chunk_parser_config = dict(params.get("chunk_parser_config") or {})
             chunk_parser_config.setdefault("embed_model_id", (await system_options.get())["embed_model"])
             params["chunk_parser_config"] = chunk_parser_config
-            markdown_content = await self._read_markdown_from_minio(file_meta["markdown_file"])
+            markdown_content = await documents.read_markdown_from_minio(file_meta["markdown_file"])
             filename = file_meta.get("filename")
 
             chunks = self._split_text_into_chunks(markdown_content, file_id, filename, params)
@@ -877,7 +831,7 @@ class MilvusKB(KnowledgeExecutor):
                 **chunk_stats,
                 **owner_filter,
             )
-            return self.file_record_to_meta(updated_record)
+            return documents.file_record_to_meta(updated_record)
 
         except (Exception, asyncio.CancelledError) as e:
             if isinstance(e, asyncio.CancelledError):

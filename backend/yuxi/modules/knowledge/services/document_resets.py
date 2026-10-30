@@ -15,6 +15,7 @@ from yuxi.modules.knowledge.repositories.directories import DirectoryRepository
 from yuxi.modules.knowledge.repositories.document_resets import RESET_ACTION_LABELS, RESET_JOB_TYPE, DocumentResetRepository
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 from yuxi.modules.knowledge.runtime import knowledge_base
+from yuxi.modules.knowledge.services import documents
 from yuxi.modules.knowledge.utils import resolve_processing_params, sanitize_processing_params
 from yuxi.shared.errors import InvalidOperationError, OperationFailedError, StateConflictError
 
@@ -22,13 +23,10 @@ from yuxi.shared.errors import InvalidOperationError, OperationFailedError, Stat
 async def read_markdown_for_edit(kb_id: str, file_id: str) -> dict:
     """严格读取当前正文；无解析指针才允许显式空白人工解析。"""
     async with DocumentResetRepository.markdown_snapshot(kb_id, file_id) as file:
-        executor = await knowledge_base.get_cleanup_executor(kb_id)
-        if executor is None:
-            raise InvalidOperationError("知识库执行器不可用")
         content = ""
         if file.markdown_file:
             try:
-                result = await await_io(executor.get_file_download(kb_id, file_id, variant="parsed"))
+                result = await await_io(documents.get_file_download(kb_id, file_id, variant="parsed"))
                 content = result["content"].decode("utf-8")
             except Exception as exc:
                 raise OperationFailedError("无法读取现有 Markdown，请恢复解析产物后重试") from exc
@@ -233,7 +231,7 @@ async def run_document_reset(context) -> dict:
         )
     else:
         file = await KnowledgeFileRepository().get_by_file_id(file_id)
-        result = KnowledgeExecutor.file_record_to_meta(file)
+        result = documents.file_record_to_meta(file)
     summary = {"kb_id": kb_id, "items": [{"file_id": file_id, "status": result["status"]}], "processed": 1, "succeeded": 1, "failed": 0}
     await context.set_result(summary)
     await context.set_progress(100, f"{label}完成")

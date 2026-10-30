@@ -29,7 +29,7 @@ test('知识库详情将评估基准和近期评估收敛到同一个评估工�
   assert.match(workspaceSource, /id="recent-evaluations-title">近期评估/)
   assert.match(workspaceSource, />创建基准</)
   assert.match(workspaceSource, />新建评估</)
-  assert.match(workspaceSource, /Promise\.all\(\[\s*evaluationApi\.listDatasets/)
+  assert.match(workspaceSource, /evaluationApi\.listDatasets\(props\.kbId\)/)
   assert.match(workspaceSource, /evaluationApi\.listRuns\(props\.kbId\)/)
 })
 

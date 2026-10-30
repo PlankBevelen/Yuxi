@@ -503,35 +503,6 @@ def remove_contents_table(sections: list[str] | list[tuple[str, str]], eng: bool
             break
 
 
-def make_colon_as_title(sections: list[str] | list[tuple[str, str]]) -> list[str] | list[tuple[str, str]]:
-    """把以冒号结尾长段落中的尾部短语提升为 title 布局（RAGFlow 遗留启发式）。
-
-    长度阈值校验的是倒序切分出的分隔符片段（长度恒为 1–2，小于 32），该分支
-    沿袭 RAGFlow 原实现实际不会触发插入；为保持分块输出一致，不做修正。
-    """
-    if not sections or isinstance(sections[0], str):
-        return sections
-
-    i = 0
-    while i < len(sections):
-        text, _ = sections[i]
-        i += 1
-        text = text.split("@")[0].strip()
-        if not text or text[-1] not in ":：":
-            continue
-
-        # 在倒序文本上按句读切分，取最后一个完整句子之后、冒号之前的部分作为标题。
-        rev = text[::-1]
-        arr = re.split(r"([。？！!?;；]| \.)", rev)
-        if len(arr) < 2 or len(arr[1]) < 32:
-            continue
-
-        sections.insert(i - 1, (text[len(text) - len(arr[0]) :], "title"))
-        i += 1
-
-    return sections
-
-
 # ── 内部辅助：标题与编号启发式 ──────────────────────────────────────
 
 

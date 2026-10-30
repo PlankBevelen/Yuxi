@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from test.unit.support.knowledge import make_knowledge_file_record
+from yuxi.infrastructure.minio import ObjectSizeLimitError
 from yuxi.modules.knowledge import preview
 from yuxi.shared.files import MAX_FILE_PREVIEW_BYTES
-from yuxi.infrastructure.minio import ObjectSizeLimitError
-from test.unit.support.knowledge import make_knowledge_file_record
 
 
 class FakeMinioClient:
@@ -51,6 +52,13 @@ def make_file_record(**overrides) -> SimpleNamespace:
 
 
 def stub_file_record(monkeypatch: pytest.MonkeyPatch, record: SimpleNamespace) -> None:
+    @asynccontextmanager
+    async def projection_lock(*_args, **_kwargs):
+        """对象内容单测由集成用例覆盖数据库并发边界。"""
+        yield
+
+    monkeypatch.setattr(preview, "knowledge_projection_lock", projection_lock)
+
     async def get_by_file_id(file_id: str):
         assert file_id == record.file_id
         return record

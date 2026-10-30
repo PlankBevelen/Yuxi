@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from sqlalchemy import Exists, Select, delete, exists, func, or_, select, update
+from sqlalchemy import Exists, Select, delete, exists, func, select, update
 
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.knowledge.models import KnowledgeChunk, KnowledgeFile
@@ -198,29 +198,13 @@ class KnowledgeChunkRepository:
             )
             return list(result.scalars().all())
 
-    async def count_graph_indexed_by_file_id(self, file_id: str, *, generation: int | None = None) -> int:
-        """计数已经或可能发布图谱的 Chunk，清理覆盖部分构建。"""
-        filters = [
-            KnowledgeChunk.file_id == file_id,
-            or_(
-                KnowledgeChunk.graph_indexed.is_(True),
-                KnowledgeChunk.graph_structure_indexed.is_(True),
-                KnowledgeChunk.graph_extraction_details["status"].as_string() == "succeeded",
-            ),
-        ]
-        if generation is not None:
-            filters.append(KnowledgeChunk.generation == generation)
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(func.count()).select_from(KnowledgeChunk).where(*filters))
-            return int(result.scalar() or 0)
-
     async def list_graph_extraction_failed_samples(self, kb_id: str, limit: int = GRAPH_FAILED_SAMPLES_MAX) -> list[dict[str, Any]]:
         """按 id 倒序返回最近的抽取失败样本摘要，limit 夹在 [1, GRAPH_FAILED_SAMPLES_MAX]。"""
         status = KnowledgeChunk.graph_extraction_details["status"].as_string()
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(KnowledgeChunk)
-                .where(KnowledgeChunk.kb_id == kb_id, status == "failed")
+                .where(KnowledgeChunk.kb_id == kb_id, status == "failed", self.visible_scope())
                 .order_by(KnowledgeChunk.id.desc())
                 .limit(max(1, min(limit, self.GRAPH_FAILED_SAMPLES_MAX)))
             )

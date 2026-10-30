@@ -57,7 +57,7 @@ async def test_delete_knowledge_base_commits_tombstone_before_any_external_clean
         lambda: repository,
     )
     executor = AsyncMock(side_effect=RuntimeError("Milvus offline"))
-    monkeypatch.setattr(manager, "get_kb_executor", executor)
+    monkeypatch.setattr(manager, "_get_or_create_kb_instance", executor)
     result = await manager.delete_knowledge_base("kb_1")
     assert result == {"message": "删除成功"}
     repository.mark_deleted.assert_awaited_once_with("kb_1")
@@ -114,35 +114,6 @@ async def test_update_query_params_delegates_persistence_to_manager(tmp_path, mo
     await manager.update_kb_query_params("kb_1", {"top_k": 5})
 
     assert calls == [("kb_1", {"top_k": 5})]
-
-
-async def test_consistency_check_delegates_type_resources_to_executor(tmp_path, monkeypatch):
-    manager = KnowledgeBaseManager(str(tmp_path))
-    calls = []
-
-    class FakeExecutor:
-        async def detect_data_inconsistencies(self, known_kb_ids: set[str], managed_kb_ids: set[str]):
-            calls.append((known_kb_ids, managed_kb_ids))
-            return {"missing_collections": [], "missing_files": []}
-
-    class FakeRepository:
-        async def get_all(self):
-            return [
-                SimpleNamespace(kb_id="kb_1", kb_type="milvus"),
-                SimpleNamespace(kb_id="kb_2", kb_type="dify"),
-            ]
-
-    manager.kb_instances["milvus"] = FakeExecutor()
-    monkeypatch.setattr(
-        "yuxi.modules.knowledge.repositories.bases.KnowledgeBaseRepository",
-        FakeRepository,
-    )
-
-    result = await manager.detect_data_inconsistencies()
-
-    assert calls == [({"kb_1", "kb_2"}, {"kb_1"})]
-    assert result["total_missing_collections"] == 0
-    assert result["total_missing_files"] == 0
 
 
 @pytest.mark.asyncio

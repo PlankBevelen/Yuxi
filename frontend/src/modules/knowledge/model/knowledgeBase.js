@@ -1,10 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, reactive, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { knowledgeBaseApi, documentApi, queryApi } from '@/apis/knowledge_api'
+import { knowledgeBaseApi, documentApi } from '@/apis/knowledge_api'
 import { useBackgroundJobsStore } from '@/modules/background-jobs'
 import { useUserStore } from '@/modules/identity'
-import { useRouter } from 'vue-router'
 import { parseToShanghai } from '@/shared/lib/time'
 import { canSelectFile, isProcessingFile } from '@/modules/knowledge/model/knowledge_file_policy'
 
@@ -25,7 +24,6 @@ export function consumeSubmissionGrace({ hasWaitingFiles, gracePolls }) {
 }
 
 export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
-  const router = useRouter()
   const jobsStore = useBackgroundJobsStore()
   const userStore = useUserStore()
 
@@ -37,8 +35,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
   const documentFiles = ref([])
   const folderBreadcrumbs = ref([{ file_id: null, filename: '全部文件' }])
 
-  const queryParams = ref([])
-  const meta = reactive({})
   const selectedRowKeys = ref([])
   const fileBrowser = reactive({
     loading: false,
@@ -59,8 +55,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     fileDetailModalVisible: false,
     batchDeleting: false,
     chunkLoading: false,
-    autoRefresh: false,
-    queryParamsLoading: false
+    autoRefresh: false
   })
 
   let autoRefreshSource = null // Tracks whether auto-refresh was user-triggered or automatic
@@ -164,7 +159,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     }
   }
 
-  async function getKnowledgeBaseInfo(id, skipQueryParams = false, isBackground = false) {
+  async function getKnowledgeBaseInfo(id, isBackground = false) {
     const kbIdValue = id || kbId.value
     const token = userStore.token
     if (!kbIdValue) return
@@ -190,11 +185,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
       }
       // 元信息响应可能不含 files；只据此开启，不能当作"无活动"停止或消耗宽限。
       ensureAutoRefreshForProcessing(knowledgeBase.value.files, knowledgeBase.value.stats, Boolean(data?.files))
-
-      // Only load query parameters if explicitly requested or if not loaded yet
-      if (!skipQueryParams && queryParams.value.length === 0) {
-        await loadQueryParams(kbIdValue)
-      }
     } catch (error) {
       console.error(error)
       message.error(error.message || '获取知识库信息失败')
@@ -206,47 +196,29 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     }
   }
 
-  async function updateKnowledgeBaseInfo(formData) {
+  async function updateKnowledgeBaseInfo(id, formData) {
+    const token = userStore.token
+    if (id !== kbId.value) return
     try {
       state.lock = true
-      await knowledgeBaseApi.updateKnowledgeBase(kbId.value, formData)
+      await knowledgeBaseApi.updateKnowledgeBase(id, formData)
+      if (id !== kbId.value || token !== userStore.token) return
       message.success('知识库信息更新成功')
-      await getKnowledgeBaseInfo() // Load query params after updating knowledgeBase info
+      await getKnowledgeBaseInfo(id)
     } catch (error) {
+      if (id !== kbId.value || token !== userStore.token) return
       console.error(error)
       message.error(error.message || '更新失败')
     } finally {
-      state.lock = false
+      if (id === kbId.value && token === userStore.token) state.lock = false
     }
-  }
-
-  function deleteKnowledgeBase() {
-    Modal.confirm({
-      title: '删除知识库',
-      content: '确定要删除该知识库吗？',
-      okText: '确认',
-      cancelText: '取消',
-      onOk: async () => {
-        state.lock = true
-        try {
-          const data = await knowledgeBaseApi.deleteKnowledgeBase(kbId.value)
-          message.success(data.message || '删除成功')
-          router.push({ path: '/extensions', query: { tab: 'knowledge' } })
-        } catch (error) {
-          console.error(error)
-          message.error(error.message || '删除失败')
-        } finally {
-          state.lock = false
-        }
-      }
-    })
   }
 
   async function deleteFile(fileId) {
     state.lock = true
     try {
       await documentApi.deleteDocument(kbId.value, fileId)
-      await getKnowledgeBaseInfo(undefined, true) // Skip query params for file deletion
+      await getKnowledgeBaseInfo()
       await loadDocumentFiles({ isBackground: true })
     } catch (error) {
       console.error(error)
@@ -327,7 +299,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
           }
 
           selectedRowKeys.value = []
-          await getKnowledgeBaseInfo(undefined, true) // Skip query params for batch deletion
+          await getKnowledgeBaseInfo()
           await loadDocumentFiles({ isBackground: true })
         } catch (error) {
           message.destroy(progressKey)
@@ -516,7 +488,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     const token = userStore.token
     return jobsStore.createJobRegistration(() => {
       if (kbId.value !== submittedKbId || userStore.token !== token) return
-      void getKnowledgeBaseInfo(undefined, true, true)
+      void getKnowledgeBaseInfo(undefined, true)
       void loadDocumentFiles({ isBackground: true })
     })
   }
@@ -633,39 +605,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     fileDetailFileId.value = null
   }
 
-  async function loadQueryParams(id) {
-    const kbIdValue = id || kbId.value
-    if (!kbIdValue) return
-
-    state.queryParamsLoading = true
-    try {
-      const response = await queryApi.getKnowledgeBaseQueryParams(kbIdValue)
-      queryParams.value = response.params?.options || []
-
-      // Create a set of currently supported parameter keys
-      const supportedParamKeys = new Set(queryParams.value.map((param) => param.key))
-
-      // Remove unsupported parameters from meta
-      for (const key in meta) {
-        if (key !== 'kb_id' && !supportedParamKeys.has(key)) {
-          delete meta[key]
-        }
-      }
-
-      // Add default values for supported parameters that are not in meta
-      queryParams.value.forEach((param) => {
-        if (!(param.key in meta)) {
-          meta[param.key] = param.default
-        }
-      })
-    } catch (error) {
-      console.error('Failed to load query params:', error)
-      message.error('加载查询参数失败')
-    } finally {
-      state.queryParamsLoading = false
-    }
-  }
-
   // 链式调度：等上一轮请求全部返回后再排下一轮，避免慢接口下请求堆积重叠
   function scheduleAutoRefresh() {
     refreshTimer = setTimeout(runAutoRefreshTick, refreshIntervalMs)
@@ -678,7 +617,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     if (!state.autoRefresh) return
 
     await Promise.all([
-      getKnowledgeBaseInfo(undefined, true, true), // Skip loading query params during auto-refresh
+      getKnowledgeBaseInfo(undefined, true),
       loadDocumentFiles({ isBackground: true })
     ])
 
@@ -742,7 +681,7 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
   // 延时刷新文件理解（延迟1秒后刷新）
   async function delayedRefresh() {
     await new Promise((resolve) => setTimeout(resolve, 1000))
-    await getKnowledgeBaseInfo(undefined, true)
+    await getKnowledgeBaseInfo()
     await loadDocumentFiles({ isBackground: true })
   }
 
@@ -759,20 +698,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
       autoRefreshManualOverride = true
       autoRefreshSource = null
       stopAutoRefresh()
-    }
-  }
-
-  function selectAllFailedFiles() {
-    const files = Object.values(knowledgeBase.value.files || {})
-    const failedFiles = files.filter((file) => file.status === 'failed').map((file) => file.file_id)
-
-    const newSelectedKeys = [...new Set([...selectedRowKeys.value, ...failedFiles])]
-    selectedRowKeys.value = newSelectedKeys
-
-    if (failedFiles.length > 0) {
-      message.success(`已选择 ${failedFiles.length} 个失败的文件`)
-    } else {
-      message.info('当前没有失败的文件')
     }
   }
 
@@ -799,8 +724,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     fileDetailFileId,
     documentFiles,
     folderBreadcrumbs,
-    queryParams,
-    meta,
     selectedRowKeys,
     fileBrowser,
     state,
@@ -808,7 +731,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     createKnowledgeBase,
     getKnowledgeBaseInfo,
     updateKnowledgeBaseInfo,
-    deleteKnowledgeBase,
     deleteFile,
     handleDeleteFile,
     handleBatchDelete,
@@ -819,7 +741,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     indexPendingFiles,
     openFileDetail,
     closeFileDetail,
-    loadQueryParams,
     loadDocumentFiles,
     enterFolder,
     goToFolder,
@@ -828,7 +749,6 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', () => {
     startAutoRefresh,
     stopAutoRefresh,
     toggleAutoRefresh,
-    selectAllFailedFiles,
     getKnowledgeBaseNameById
   }
 })

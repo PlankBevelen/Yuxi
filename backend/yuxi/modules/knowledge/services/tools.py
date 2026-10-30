@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from yuxi.modules.knowledge.factory import KnowledgeBaseFactory
 from yuxi.modules.knowledge.runtime import knowledge_base
 
 
@@ -25,7 +26,9 @@ def list_kbs(visible_kbs: list[dict[str, Any]], *, include_capabilities: bool = 
             "description": kb.get("description") or "无描述",
         }
         if include_capabilities:
-            item["supports_documents"] = knowledge_base.knowledge_base_type_supports_documents(kb.get("kb_type"))
+            kb_class = KnowledgeBaseFactory.get_kb_class(kb["kb_type"])
+            item["supports_documents"] = kb_class.supports_documents
+            item["supports_document_read"] = kb_class.supports_document_read
         result.append(item)
     return result
 
@@ -46,7 +49,6 @@ async def query_kb(
     visible_kbs: list[dict[str, Any]],
     *,
     file_name: str | None = None,
-    kb_service: Any = None,
 ) -> Any:
     """在可见知识库中检索结构化片段。"""
     if not kb_id:
@@ -55,7 +57,7 @@ async def query_kb(
         raise KnowledgeToolError("请提供查询内容")
     target = require_visible_kb(kb_id, visible_kbs)
     options = {"file_name": file_name} if file_name else {}
-    return await (kb_service or knowledge_base).retrieve(target, query_text, **options)
+    return await knowledge_base.retrieve(target, query_text, **options)
 
 
 async def open_kb_document(
@@ -66,7 +68,6 @@ async def open_kb_document(
     line: int | None = None,
     offset: int | None = None,
     window_size: int = 1800,
-    kb_service: Any = None,
 ) -> Any:
     """按行窗口打开可见知识库的文档。"""
     if not str(kb_id or "").strip():
@@ -75,7 +76,7 @@ async def open_kb_document(
         raise KnowledgeToolError("请提供 file_id")
     target = require_visible_kb(kb_id, visible_kbs)
     start = int(line) - 1 if line is not None else int(offset or 0)
-    return await (kb_service or knowledge_base).open_document(
+    return await knowledge_base.open_document(
         target,
         str(file_id).strip(),
         offset=start,
@@ -93,7 +94,6 @@ async def find_kb_document(
     case_sensitive: bool = False,
     max_windows: int = 5,
     window_size: int = 80,
-    kb_service: Any = None,
 ) -> Any:
     """在可见知识库的指定文件中定位内容。"""
     if not str(kb_id or "").strip():
@@ -103,7 +103,7 @@ async def find_kb_document(
     if not patterns:
         raise KnowledgeToolError("请提供 patterns")
     target = require_visible_kb(kb_id, visible_kbs)
-    return await (kb_service or knowledge_base).find_in_document(
+    return await knowledge_base.find_in_document(
         target,
         str(file_id).strip(),
         patterns,
@@ -122,7 +122,6 @@ async def search_file(
     query: str | None = None,
     offset: int = 0,
     limit: int = 300,
-    kb_service: Any = None,
 ) -> Any:
     """按可见范围和文件名搜索知识库文件。"""
     if not kb_id and not kb_name and not query:
@@ -137,8 +136,7 @@ async def search_file(
         target_kbs = [kb for kb in target_kbs if kb.get("name") == kb_name]
         if not target_kbs:
             raise KnowledgeToolError(f"知识库 '{kb_name}' 不存在或当前会话未启用", not_found=True)
-    service = kb_service or knowledge_base
-    searchable = [kb for kb in target_kbs if service.knowledge_base_type_supports_documents(kb.get("kb_type"))]
+    searchable = [kb for kb in target_kbs if knowledge_base.knowledge_base_type_supports_documents(kb.get("kb_type"))]
     if not searchable:
         raise KnowledgeToolError("当前匹配的知识库只支持检索，不支持文件搜索")
-    return await service.search_document_files(searchable, query=query, offset=offset, limit=limit)
+    return await knowledge_base.search_document_files(searchable, query=query, offset=offset, limit=limit)

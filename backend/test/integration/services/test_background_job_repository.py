@@ -349,6 +349,45 @@ async def test_pending_dataset_cancel_commits_domain_and_job_terminal_together(b
     assert dataset.build_metadata["message"] == "任务已取消"
 
 
+@pytest.mark.parametrize("replaced", [False, True])
+@pytest.mark.parametrize("outcome", ["invalid", "cancelled", "expired"])
+async def test_unknown_dataset_job_version_fails_only_its_own_build(background_job_schema, replaced, outcome) -> None:
+    """无法重建的作业必须收敛所属数据集，不能覆盖新的生成任务。"""
+    dataset_id = f"dataset_{uuid.uuid4().hex[:8]}"
+    kb_id = f"kb_{uuid.uuid4().hex[:8]}"
+    job_id = uuid.uuid4().hex
+    current_job = "new-job" if replaced else job_id
+    async with background_job_schema.get_async_session_context() as session:
+        await _seed_knowledge_base(session, kb_id)
+        session.add(
+            EvaluationDataset(
+                dataset_id=dataset_id,
+                kb_id=kb_id,
+                name="pytest",
+                item_count=0,
+                build_metadata={"source": "generated", "status": "pending", "job_id": current_job},
+            )
+        )
+    await BackgroundJobRepository().create(
+        job_id, {**_job_data(), "type": "dataset_generation", "handler_version": 999, "payload": {"dataset_id": dataset_id}}
+    )
+
+    repo = BackgroundJobRepository()
+    if outcome == "cancelled":
+        await repo.request_cancel(job_id)
+    if outcome == "expired":
+        _, claimed = await repo.claim(job_id, worker_id="old", lease_seconds=1, now=utc_now() - timedelta(minutes=1))
+        assert claimed
+        await repo.reconcile_expired_leases(before_fail=finalize_job_failure)
+    else:
+        await publish_pending_jobs()
+
+    assert (await repo.get_by_id(job_id)).status == ("cancelled" if outcome == "cancelled" else "failed")
+    metadata = (await EvaluationRepository().get_dataset(dataset_id)).build_metadata
+    assert metadata["job_id"] == current_job
+    assert metadata["status"] == ("pending" if replaced else "failed")
+
+
 async def test_cancel_request_wins_race_with_successful_handler(background_job_schema) -> None:
     job_id = uuid.uuid4().hex
     repo = BackgroundJobRepository()

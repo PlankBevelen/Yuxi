@@ -85,9 +85,6 @@
             <div class="setting-content">
               <ChunkParamsConfig
                 :temp-chunk-params="indexParams"
-                :show-qa-split="true"
-                :show-chunk-size-overlap="true"
-                :show-preset="true"
                 :allow-preset-follow-default="true"
                 :knowledge-base-preset-id="
                   store.knowledgeBase?.additional_params?.chunk_preset_id || 'general'
@@ -613,9 +610,7 @@ const indexParams = ref({
 })
 
 const buildAutoIndexParams = () => {
-  return buildChunkParamsPayload(indexParams.value, {
-    includeSizeOverlap: true
-  })
+  return buildChunkParamsPayload(indexParams.value)
 }
 
 const isFolderUpload = ref(false)

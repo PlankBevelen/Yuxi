@@ -102,7 +102,7 @@ class EvaluationMetricsCalculator:
         retrieved_chunks: list[dict[str, Any]], gold_chunk_ids: list[str], k_values: list[int] | tuple[int, ...] = (1, 3, 5, 10)
     ) -> dict[str, float]:
         """计算检索指标 (Recall, F1)"""
-        if not retrieved_chunks or not gold_chunk_ids:
+        if not gold_chunk_ids:
             return {}
 
         # 提取 ID

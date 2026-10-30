@@ -458,7 +458,7 @@ async def markdown_data(document_data, monkeypatch, tmp_path):
 
     data.source = source
     monkeypatch.setattr(data.executor, "save_markdown_artifact", stage)
-    monkeypatch.setattr(data.executor, "get_file_download", download)
+    monkeypatch.setattr(resets.documents, "get_file_download", download)
     data.client = SimpleNamespace(
         KB_BUCKETS={"parsed": "parsed", "images": "kb-images"}, adelete_objects_by_prefix=delete_prefix, adelete_file=delete_file
     )
@@ -607,7 +607,7 @@ async def test_markdown_read_failure_is_not_empty_or_chunk_fallback(markdown_dat
     from yuxi.shared.errors import OperationFailedError
 
     data = markdown_data
-    monkeypatch.setattr(data.executor, "get_file_download", AsyncMock(side_effect=RuntimeError("missing object")))
+    monkeypatch.setattr(resets.documents, "get_file_download", AsyncMock(side_effect=RuntimeError("missing object")))
     with pytest.raises(OperationFailedError, match="无法读取现有 Markdown"):
         await resets.read_markdown_for_edit(data.kb_id, "b")
     async with data.engine.begin() as conn:
@@ -707,7 +707,7 @@ async def test_markdown_committed_publish_return_failure_preserves_referenced_ob
     file = await files.KnowledgeFileRepository().get_by_file_id("b")
     assert file.status == "parsed" and file.generation == 2 and file.markdown_file != data.source
     assert data.objects[file.markdown_file] == b"new source" and data.source not in data.objects
-    assert (await data.executor.get_file_download(data.kb_id, "b", variant="parsed"))["content"] == b"new source"
+    assert (await resets.documents.get_file_download(data.kb_id, "b", variant="parsed"))["content"] == b"new source"
 
 
 async def test_markdown_unknown_publish_confirmation_preserves_real_object(markdown_data, monkeypatch):

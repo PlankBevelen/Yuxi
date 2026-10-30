@@ -21,7 +21,13 @@ async def knowledge_reference_visibility(uid, messages):
     if not any((message.extra_metadata or {}).get("tool_name") in KNOWLEDGE_REFERENCE_TOOLS for message in messages):
         return {}
     try:
-        return {item["kb_id"]: item["supports_documents"] for item in await list_knowledge_bases(uid)}
+        return {
+            item["kb_id"]: {
+                "supports_documents": item["supports_documents"],
+                "supports_document_read": item["supports_document_read"],
+            }
+            for item in await list_knowledge_bases(uid)
+        }
     except (KnowledgeMCPError, KnowledgeMCPUnavailable):
         return {}
 
@@ -30,7 +36,7 @@ def enrich_knowledge_sources(sources, document_support):
     """将当前文档读取能力附到知识来源。"""
     for source in sources:
         if source["kind"] == "knowledge":
-            source["supports_documents"] = document_support[source["kb_id"]]
+            source.update(document_support[source["kb_id"]])
 
 
 def knowledge_reference_sources(payload: dict | list, tool_name: str, kb_id: str) -> list[dict]:

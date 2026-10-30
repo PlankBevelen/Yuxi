@@ -74,7 +74,7 @@ def aggregate_metrics(
     overall_metrics = {}
 
     if retrieval_metrics_list:
-        keys = retrieval_metrics_list[0].keys()
+        keys = dict.fromkeys(key for metrics in retrieval_metrics_list for key in metrics)
         for key in keys:
             overall_metrics[key] = sum(m.get(key, 0) for m in retrieval_metrics_list) / len(retrieval_metrics_list)
 

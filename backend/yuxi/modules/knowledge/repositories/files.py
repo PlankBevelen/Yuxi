@@ -28,19 +28,6 @@ class KnowledgeFileRepository:
             result = await session.execute(select(KnowledgeFile).where(KnowledgeFile.kb_id == kb_id, KnowledgeFile.deleted_at.is_(None)))
             return list(result.scalars().all())
 
-    async def list_children(self, *, kb_id: str, parent_id: str | None) -> list[KnowledgeFile]:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(
-                select(KnowledgeFile)
-                .where(
-                    KnowledgeFile.kb_id == kb_id,
-                    KnowledgeFile.deleted_at.is_(None),
-                    self._parent_condition(parent_id),
-                )
-                .order_by(KnowledgeFile.is_folder.desc(), func.lower(KnowledgeFile.filename).asc())
-            )
-            return list(result.scalars().all())
-
     async def list_documents(
         self,
         *,
@@ -453,6 +440,7 @@ class KnowledgeFileRepository:
         processing_params: dict | None = None,
         kb_additional_params: dict | None = None,
     ) -> KnowledgeFile | None:
+        """条件领取或完成文件处理；参数合并和执行权发布共享同一事务。"""
         lease_job_id = processing_job_id or data.get("processing_job_id")
         lease_owner = processing_owner or data.get("processing_owner")
         if (lease_job_id is None) != (lease_owner is None):
@@ -478,6 +466,7 @@ class KnowledgeFileRepository:
                 await DocumentResetRepository.require_processing(
                     session, kb_id, file_id, job_id=lease_job_id if lease_owner is not None else None
                 )
+            job_record = None
             if lease_job_id is not None and lease_owner is not None:
                 # 带租约的更新先锁作业行并确认租约仍存活，过期 worker 的晚写在此被拒绝。
                 job_record = await session.scalar(

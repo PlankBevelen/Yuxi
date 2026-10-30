@@ -91,59 +91,21 @@ async def test_generate_dataset_saves_generation_params(job_submission):
 
 
 @pytest.mark.asyncio
-async def test_dataset_submission_gap_remains_pending_instead_of_false_failure(monkeypatch):
-    async def no_active_job(**_kwargs):
-        return None
+@pytest.mark.parametrize("job_id", [None, "missing-job"])
+async def test_dataset_read_preserves_persisted_state_when_job_is_missing(job_id):
+    """读取不猜测断链资源的终态，也不回填新的作业关联。"""
 
     class MissingBackgroundJobRepository:
         async def get_by_id(self, job_id):
             return None
 
-    monkeypatch.setattr(eval_service_module.job_tracker, "find_job_by_payload", no_active_job)
     service = EvaluationService()
     service.eval_repo = FakeEvaluationRepository()
     service.job_repo = MissingBackgroundJobRepository()
-    row = SimpleNamespace(
-        dataset_id="dataset_1",
-        build_metadata={"source": "generated", "status": "pending", "params": {"count": 5}},
-    )
-
-    await service._sync_dataset_build_metadata(row)
-
-    assert row.build_metadata["status"] == "pending"
+    row = SimpleNamespace(build_metadata={"source": "generated", "status": "pending", "job_id": job_id})
+    result = await service._dataset_build_metadata(row)
+    assert result == row.build_metadata
     assert service.eval_repo.updated_dataset is None
-
-
-@pytest.mark.asyncio
-async def test_pending_dataset_recovers_active_job_association(monkeypatch):
-    active_job = SimpleNamespace(id="job_1", status="pending", progress=0, message="等待 worker")
-
-    async def find_active_job(**kwargs):
-        assert kwargs == {
-            "job_type": "dataset_generation",
-            "payload_match": {"dataset_id": "dataset_1"},
-            "statuses": {"pending", "running"},
-        }
-        return active_job
-
-    class MissingBackgroundJobRepository:
-        async def get_by_id(self, job_id):
-            return None
-
-    monkeypatch.setattr(eval_service_module.job_tracker, "find_job_by_payload", find_active_job)
-    service = EvaluationService()
-    service.eval_repo = FakeEvaluationRepository()
-    service.job_repo = MissingBackgroundJobRepository()
-    row = SimpleNamespace(
-        dataset_id="dataset_1",
-        build_metadata={"source": "generated", "status": "pending", "params": {"count": 5}},
-    )
-
-    await service._sync_dataset_build_metadata(row)
-
-    assert row.build_metadata["job_id"] == "job_1"
-    assert row.build_metadata["status"] == "pending"
-    assert service.eval_repo.updated_dataset == ("dataset_1", {"build_metadata": row.build_metadata})
 
 
 @pytest.mark.asyncio
@@ -170,7 +132,7 @@ async def test_generate_dataset_rejects_graph_mode_without_indexed_chunks():
 
 
 @pytest.mark.asyncio
-async def test_list_runs_projects_failed_background_job_to_evaluation_run():
+async def test_list_runs_preserves_persisted_business_state_without_read_side_repair():
     started_at = eval_service_module.utc_now()
     run = SimpleNamespace(
         run_id="run_12345678",
@@ -212,9 +174,9 @@ async def test_list_runs_projects_failed_background_job_to_evaluation_run():
 
     result = await service.list_runs("kb_1")
 
-    assert result[0]["status"] == "failed"
-    assert result[0]["metrics"] == {"error": "worker_lease_expired"}
-    assert service.eval_repo.updated_run[0] == "run_12345678"
+    assert result[0]["status"] == "running"
+    assert result[0]["metrics"] == {}
+    assert not hasattr(service.eval_repo, "updated_run")
 
 
 def test_build_evaluation_run_name_uses_eval_date_hash_format():

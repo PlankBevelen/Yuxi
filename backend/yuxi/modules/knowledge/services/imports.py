@@ -9,12 +9,12 @@ from yuxi.infrastructure.minio.client import MinIOClient, get_minio_client
 from yuxi.infrastructure.minio.object_urls import parse_minio_url
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.background_jobs.dispatch import dispatch_job, register_job_in_session
-from yuxi.modules.knowledge.base import KnowledgeExecutor
 from yuxi.modules.knowledge.file_status import FileStatus
 from yuxi.modules.knowledge.models import KnowledgeFile, KnowledgeImport
 from yuxi.modules.knowledge.names import MAX_IMPORT_ITEMS, normalize_name, source_segments
 from yuxi.modules.knowledge.repositories.directories import DirectoryRepository
 from yuxi.modules.knowledge.repositories.document_resets import DocumentResetRepository
+from yuxi.modules.knowledge.services.documents import file_meta_to_record_data, file_record_to_meta
 from yuxi.modules.knowledge.utils import params_for_uploaded_document, prepare_item_metadata, resolve_processing_params
 from yuxi.modules.knowledge.utils.kb_utils import PREPROCESSED_UPLOADS_KEY
 from yuxi.shared.errors import DomainError, InvalidInputError, StateConflictError
@@ -150,12 +150,12 @@ async def _register_prepared(*, kb_id, prepared, params, operator_id, identity, 
                         folder = await repo.folder(session, kb_id, target, segment, operator_id, reuse=True)
                         target = folder.file_id
                     name = await repo.available_name(session, kb_id, target, segments[-1])
-                    data = KnowledgeExecutor.file_meta_to_record_data(metadata)
+                    data = file_meta_to_record_data(metadata)
                     data.update(filename=name, parent_id=target, status=FileStatus.UPLOADED, created_by=operator_id)
                     record = KnowledgeFile(file_id=metadata["file_id"], **data)
                     session.add(record)
                     await repo.flush(session)
-                    meta = KnowledgeExecutor.file_record_to_meta(record)
+                    meta = file_record_to_meta(record)
                 added.append({"index": index, "item": item, "file_id": record.file_id, "status": record.status, "file_meta": meta})
             except DomainError as exc:
                 failed.append({"index": index, "item": item, "status": "failed", "error": exc.message, "code": exc.code})
@@ -174,7 +174,12 @@ async def _register_prepared(*, kb_id, prepared, params, operator_id, identity, 
                 session,
                 name="知识库文档处理",
                 job_type="knowledge_ingest",
-                payload={"kb_id": kb_id, "files": added, "params": params, "operator_id": operator_id},
+                payload={
+                    "kb_id": kb_id,
+                    "file_ids": [entry["file_id"] for entry in added],
+                    "params": {key: params[key] for key in ("auto_index", "chunk_preset_id", "chunk_parser_config") if key in params},
+                    "operator_id": operator_id,
+                },
             )
             response.update(job_id=job.id, status="queued")
         stats = await KnowledgeFileRepository().query_kb_file_stats(kb_id, session=session)

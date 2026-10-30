@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import JSON, and_, delete, func, or_, select
 
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.knowledge.models import EvaluationDataset, EvaluationDatasetItem, EvaluationRun, EvaluationRunItem
@@ -231,13 +231,19 @@ class EvaluationRepository:
 
     @staticmethod
     def _result_filters(result_filter: str) -> list:
-        """在 SQL 中筛选后分页，缺失指标保留历史默认分值。"""
+        """在 SQL 中筛选后分页，历史零命中题按标准片段与实际检索事实识别。"""
         if result_filter == "all":
             return []
         answer_error = func.coalesce(EvaluationRunItem.metrics["score"].as_float(), 1.0) <= 0.5
         if result_filter == "answer_errors":
             return [answer_error]
-        return [or_(answer_error, func.coalesce(EvaluationRunItem.metrics["recall@10"].as_float(), 1.0) < 1)]
+        missed_retrieval = and_(
+            EvaluationRunItem.gold_chunk_ids.is_not(None),
+            EvaluationRunItem.gold_chunk_ids != JSON.NULL,
+            EvaluationRunItem.gold_chunk_ids != [],
+            EvaluationRunItem.retrieved_chunks == [],
+        )
+        return [or_(answer_error, missed_retrieval, func.coalesce(EvaluationRunItem.metrics["recall@10"].as_float(), 1.0) < 1)]
 
     # ─── 删除 ─────────────────────────────────────────────────────
 
@@ -282,7 +288,7 @@ async def fail_dataset_generation_job(session: AsyncSession, job_record: Backgro
     if dataset is None:
         return
     metadata = dict(dataset.build_metadata or {})
-    if metadata.get("status") == "completed":
+    if metadata.get("status") == "completed" or metadata.get("job_id") not in {None, job_record.id}:
         return
     metadata.update(
         status="failed",

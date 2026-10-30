@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import threading
+from html import escape
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -17,7 +18,7 @@ from docling.backend.mspowerpoint_backend import MsPowerpointDocumentBackend
 from docling.backend.msword_backend import MsWordDocumentBackend
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import InputDocument
-from docling_core.types.doc import DoclingDocument
+from docling_core.types.doc import DoclingDocument, TableCell
 from markdownify import markdownify as md_convert
 from pypdf import PdfReader
 
@@ -167,6 +168,26 @@ def _convert_with_docling(file_path: Path, output_dir: Path) -> str:
     """转换 Office 文档并保存图片，资源提取失败时拒绝整个结果。"""
     with _docling_office_lock:
         doc = _convert_office_document(file_path)
+    if file_path.suffix.lower() == ".xlsx":
+        # Excel backend 无条件把首行标成表头；空结构表头让所有原始行保留为正文。
+        for table in doc.tables:
+            for cell in table.data.table_cells:
+                cell.start_row_offset_idx += 1
+                cell.end_row_offset_idx += 1
+                cell.column_header = False
+                cell.text = _escape_table_cell(cell.text)
+            table.data.num_rows += 1
+            table.data.table_cells.extend(
+                TableCell(
+                    text="",
+                    start_row_offset_idx=0,
+                    end_row_offset_idx=1,
+                    start_col_offset_idx=column,
+                    end_col_offset_idx=column + 1,
+                    column_header=True,
+                )
+                for column in range(table.data.num_cols)
+            )
     markdown = doc.export_to_markdown()
     for index, picture in enumerate(doc.pictures):
         image = getattr(picture, "image", None)
@@ -204,15 +225,16 @@ def _convert_office_document(file_path: Path) -> DoclingDocument:
 
 
 def _convert_csv_to_markdown(file_path: Path) -> str:
-    """把 CSV 的每一行渲染为独立 Markdown 表格，列类型由 pandas 推断。"""
-
+    """把 CSV 数据行渲染为独立 Markdown 表格，保留字段的字面文本。"""
     import pandas as pd
 
-    dataframe = pd.read_csv(io.StringIO(decode_user_text(file_path.read_bytes(), file_path.name)))
+    dataframe = pd.read_csv(io.StringIO(decode_user_text(file_path.read_bytes(), file_path.name)), dtype=str, keep_default_na=False)
+    dataframe = dataframe.map(_escape_table_cell)
+    dataframe.columns = [_escape_table_cell(column) for column in dataframe.columns]
     tables: list[str] = []
     for i in range(len(dataframe)):
         row_dataframe = dataframe.iloc[[i]]
-        tables.append(row_dataframe.to_markdown(index=False))
+        tables.append(row_dataframe.to_markdown(index=False, disable_numparse=True))
     return "\n\n".join(tables)
 
 
@@ -228,5 +250,16 @@ def _convert_xls_to_markdown(file_path: Path) -> str:
             continue
         if len(sheet_map) > 1:
             blocks.append(f"## {sheet_name}")
-        blocks.append(dataframe.to_markdown(index=False, headers=[""] * len(dataframe.columns), disable_numparse=True))
+        blocks.append(
+            dataframe.map(_escape_table_cell).to_markdown(index=False, headers=[""] * len(dataframe.columns), disable_numparse=True)
+        )
     return "\n\n".join(blocks)
+
+
+def _escape_table_cell(value):
+    """保持字段为单个 Markdown 单元格，原始 HTML 与换行结构分别编码。"""
+    if not isinstance(value, str):
+        return value
+    text = escape(value, quote=False)
+    text = re.sub(r"([\\`*_\[\]])", r"\\\1", text)
+    return text.replace("|", "&#124;").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")

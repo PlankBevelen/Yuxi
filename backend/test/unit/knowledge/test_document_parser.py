@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 import yuxi.infrastructure.document_parsing.engines as engines
 import yuxi.infrastructure.document_parsing.parser as parser_unified
@@ -192,25 +191,13 @@ async def test_pdf_never_enters_office_backend(tmp_path: Path, monkeypatch: pyte
     assert "Existing PDF path" in markdown
 
 
-def test_convert_csv_to_markdown_preserves_column_dtypes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_convert_csv_to_markdown_preserves_numeric_text(tmp_path: Path) -> None:
+    """大整数编号不能在 Markdown 转换中被浮点化或改写。"""
     file_path = tmp_path / "parser_test.csv"
     file_path.write_text("id,score\n9007199254740993,2.5\n", encoding="utf-8")
-    captured_dtypes: list[dict[str, object]] = []
-    original_to_markdown = pd.DataFrame.to_markdown
-
-    def _capture_dtypes(dataframe: pd.DataFrame, *args, **kwargs) -> str:
-        captured_dtypes.append(dataframe.dtypes.to_dict())
-        return original_to_markdown(dataframe, *args, **kwargs)
-
-    monkeypatch.setattr(pd.DataFrame, "to_markdown", _capture_dtypes)
-
     markdown = parser_unified._convert_csv_to_markdown(file_path)
-
-    assert markdown
-    assert str(captured_dtypes[0]["id"]) == "int64"
+    assert "9007199254740993" in markdown
+    assert "2.5" in markdown
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,9 @@ import types
 from collections import Counter
 from unittest.mock import AsyncMock
 
-
+from test.unit.support.knowledge import FakeKnowledgeBase, make_knowledge_file_record
 from yuxi.modules.knowledge.manager import KnowledgeBaseManager
 from yuxi.modules.knowledge.read_models import KnowledgeBaseDetail
-from test.unit.support.knowledge import FakeKnowledgeBase, make_knowledge_file_record
 
 
 class FakeKnowledgeBaseRepository:
@@ -122,7 +121,10 @@ async def test_create_knowledge_base_persists_allowed_record_fields(tmp_path, mo
         return False
 
     monkeypatch.setattr(manager, "knowledge_base_name_exists", knowledge_base_name_available)
-    monkeypatch.setattr(manager, "_get_or_create_kb_instance", AsyncMock(return_value=kb))
+    monkeypatch.setattr(
+        manager, "_get_or_create_kb_instance", AsyncMock(side_effect=AssertionError("metadata must not construct executor"))
+    )
+    monkeypatch.setattr("yuxi.modules.knowledge.manager.KnowledgeBaseFactory.get_kb_class", lambda _: type(kb))
     monkeypatch.setattr(
         "yuxi.modules.knowledge.manager.KnowledgeBaseFactory.is_type_supported",
         classmethod(lambda cls, _kb_type: True),

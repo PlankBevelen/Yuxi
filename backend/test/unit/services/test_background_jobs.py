@@ -12,14 +12,14 @@ import pytest
 
 import yuxi.modules.background_jobs.dispatch as job_queue_service
 import yuxi.modules.background_jobs.service as job_service
+import yuxi.modules.knowledge.services.background_jobs as knowledge_job_service
+import yuxi.workers.background_job_context as job_context
+import yuxi.workers.background_jobs as job_worker
+from yuxi.modules.background_jobs.registry import get_job_definition
 from yuxi.modules.background_jobs.service import JobTracker
+from yuxi.shared.datetime import utc_now
 from yuxi.workers.background_job_context import BackgroundJobContext
 from yuxi.workers.background_jobs import process_background_job
-import yuxi.workers.background_jobs as job_worker
-import yuxi.workers.background_job_context as job_context
-from yuxi.modules.background_jobs.registry import get_job_definition
-from yuxi.shared.datetime import utc_now
-import yuxi.modules.knowledge.services.background_jobs as knowledge_job_service
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +86,10 @@ class FakeRepo:
             return self.record, False
         self.record = make_record(id=job_id, **data)
         return self.record, True
+
+    async def create_or_get_in_session(self, session, job_id, data):
+        """登记接口复用同一持久测试替身。"""
+        return await self.create(job_id, data)
 
     async def get_by_id(self, job_id: str):
         return self.record if self.record and self.record.id == job_id else None
@@ -185,7 +189,7 @@ async def test_arq_publication_uses_fresh_messages_instead_of_stale_job_lock(mon
     assert calls == [(("process_background_job", "job-1"), {})]
 
 
-async def test_submit_persists_before_arq_publication(monkeypatch):
+async def test_registration_does_not_publish_before_the_caller_commits(monkeypatch):
     repo = FakeRepo()
     job_tracker = JobTracker()
     job_tracker._repo = repo
@@ -199,7 +203,9 @@ async def test_submit_persists_before_arq_publication(monkeypatch):
     monkeypatch.setattr(job_queue_service, "job_tracker", job_tracker)
     monkeypatch.setattr(job_queue_service, "publish_job", publish)
 
-    job, _ = await job_queue_service.submit_job(name="demo", job_type="demo", payload={"value": 1})
+    job, _ = await job_queue_service.register_job_in_session(object(), name="demo", job_type="demo", payload={"value": 1})
+    assert repo.events == ["persist"]
+    await job_queue_service.dispatch_job(job.id)
 
     assert repo.events == ["persist", "publish"]
     assert job.payload == {"value": 1}
@@ -218,14 +224,16 @@ async def test_publication_failure_keeps_persisted_pending_intent(monkeypatch):
     monkeypatch.setattr(job_queue_service, "job_tracker", job_tracker)
     monkeypatch.setattr(job_queue_service, "publish_job", fail_publication)
 
-    job, _ = await job_queue_service.submit_job(name="demo", job_type="demo", payload={"value": 1})
+    job, _ = await job_queue_service.register_job_in_session(object(), name="demo", job_type="demo", payload={"value": 1})
+    assert repo.events == ["persist"]
+    await job_queue_service.dispatch_job(job.id)
 
     assert job.status == "pending"
     assert repo.record is not None
     assert repo.record.payload == {"value": 1}
 
 
-async def test_unique_submit_uses_database_dedupe_and_does_not_republish(monkeypatch):
+async def test_unique_registration_uses_database_dedupe_and_leaves_publication_to_caller(monkeypatch):
     repo = FakeRepo()
     job_tracker = JobTracker()
     job_tracker._repo = repo
@@ -239,13 +247,15 @@ async def test_unique_submit_uses_database_dedupe_and_does_not_republish(monkeyp
     monkeypatch.setattr(job_queue_service, "job_tracker", job_tracker)
     monkeypatch.setattr(job_queue_service, "publish_job", publish)
 
-    first, first_created = await job_queue_service.submit_job(
+    first, first_created = await job_queue_service.register_job_in_session(
+        object(),
         name="demo",
         job_type="demo",
         payload={"kb_id": "kb-1"},
         payload_match={"kb_id": "kb-1"},
     )
-    second, second_created = await job_queue_service.submit_job(
+    second, second_created = await job_queue_service.register_job_in_session(
+        object(),
         name="demo",
         job_type="demo",
         payload={"kb_id": "kb-1"},
@@ -255,7 +265,7 @@ async def test_unique_submit_uses_database_dedupe_and_does_not_republish(monkeyp
     assert first_created is True
     assert second_created is False
     assert second.id == first.id
-    assert published == [first.id]
+    assert published == []
 
 
 async def test_job_context_throttles_progress_and_rejects_lost_lease(monkeypatch):

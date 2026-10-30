@@ -169,8 +169,22 @@ async def test_bad_persisted_knowledge_config_can_be_read_and_repaired(boundary)
         assert row.additional_params["chunk_preset_id"] == "qa"
 
 
-async def test_file_claim_repairs_persisted_config(boundary):
-    """领取文件时修复配置，状态与参数在同一事务发布。"""
+async def _claim_parse(params, *, additional_params=None, operator_id="modifier"):
+    """走文件领取事务，配置和状态必须同时提交或回滚。"""
+    record = await KnowledgeFileRepository().update_fields_if_status(
+        kb_id="fixture-kb",
+        file_id="fixture-file",
+        allowed_statuses={"uploaded"},
+        data={"status": "parsing", "updated_by": operator_id},
+        processing_params=params,
+        kb_additional_params=additional_params or {},
+    )
+    assert record is not None
+    return record
+
+
+async def test_processing_claim_repairs_persisted_config(boundary):
+    """领取事务校验合并配置，并在持久化状态切换时修复坏值。"""
     _, factory = boundary
     async with factory() as db, db.begin():
         db.add(
@@ -183,14 +197,7 @@ async def test_file_claim_repairs_persisted_config(boundary):
             )
         )
     patch = {"chunk_preset_id": "qa", "chunk_parser_config": {"chunk_token_num": 256}}
-    await KnowledgeFileRepository().update_fields_if_status(
-        kb_id="fixture-kb",
-        file_id="fixture-file",
-        allowed_statuses={"uploaded"},
-        data={"status": "parsing", "updated_by": "modifier"},
-        processing_params=patch,
-        kb_additional_params={},
-    )
+    await _claim_parse(patch)
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
         assert row.status == "parsing" and row.updated_by == "modifier"
@@ -198,7 +205,7 @@ async def test_file_claim_repairs_persisted_config(boundary):
         assert row.processing_params["chunk_parser_config"] == {"chunk_token_num": 256}
 
 
-async def test_file_claim_empty_patch_preserves_current_chunk_configuration(boundary):
+async def test_empty_claim_patch_preserves_current_chunk_configuration(boundary):
     """缺省补丁保留文件覆盖值和已有解析参数。"""
     _, factory = boundary
     original = {"chunk_preset_id": "qa", "chunk_parser_config": {"chunk_token_num": 256}}
@@ -206,13 +213,9 @@ async def test_file_claim_empty_patch_preserves_current_chunk_configuration(boun
         db.add(
             KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", status="uploaded", processing_params=original)
         )
-    await KnowledgeFileRepository().update_fields_if_status(
-        kb_id="fixture-kb",
-        file_id="fixture-file",
-        allowed_statuses={"uploaded"},
-        data={"status": "parsing", "updated_by": "modifier"},
-        processing_params={"chunk_preset_id": "", "chunk_parser_config": None},
-        kb_additional_params={"chunk_preset_id": "book"},
+    await _claim_parse(
+        {"chunk_preset_id": "", "chunk_parser_config": None},
+        additional_params={"chunk_preset_id": "book"},
     )
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
@@ -222,8 +225,8 @@ async def test_file_claim_empty_patch_preserves_current_chunk_configuration(boun
 
 
 @pytest.mark.parametrize("invalid", [False, 0, []])
-async def test_invalid_file_claim_leaves_persisted_state_unchanged(boundary, invalid):
-    """非法补丁使领取事务回滚，参数、状态和操作者都保持原值。"""
+async def test_invalid_claim_patch_leaves_persisted_configuration_unchanged(boundary, invalid):
+    """假值非法补丁也必须拒绝，不能被空值继承逻辑忽略。"""
     from yuxi.modules.knowledge.chunking.presets import ChunkConfigError
 
     _, factory = boundary
@@ -233,14 +236,7 @@ async def test_invalid_file_claim_leaves_persisted_state_unchanged(boundary, inv
             KnowledgeFile(file_id="fixture-file", kb_id="fixture-kb", filename="fixture.md", status="uploaded", processing_params=original)
         )
     with pytest.raises(ChunkConfigError, match="chunk_preset_id"):
-        await KnowledgeFileRepository().update_fields_if_status(
-            kb_id="fixture-kb",
-            file_id="fixture-file",
-            allowed_statuses={"uploaded"},
-            data={"status": "parsing", "updated_by": "modifier"},
-            processing_params={"chunk_preset_id": invalid},
-            kb_additional_params={},
-        )
+        await _claim_parse({"chunk_preset_id": invalid}, operator_id="modifier")
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
         assert row.processing_params == original
@@ -249,7 +245,7 @@ async def test_invalid_file_claim_leaves_persisted_state_unchanged(boundary, inv
         assert row.updated_by is None
 
 
-async def test_file_claim_replaces_non_chunk_nested_options(boundary):
+async def test_processing_claim_replaces_non_chunk_nested_options(boundary):
     """普通处理选项仍由请求整体覆盖，不递归保留已删除的键。"""
     _, factory = boundary
     async with factory() as db, db.begin():
@@ -262,14 +258,7 @@ async def test_file_claim_replaces_non_chunk_nested_options(boundary):
                 processing_params={"custom": {"keep": 1, "removed": 2}},
             )
         )
-    await KnowledgeFileRepository().update_fields_if_status(
-        kb_id="fixture-kb",
-        file_id="fixture-file",
-        allowed_statuses={"uploaded"},
-        data={"status": "parsing", "updated_by": "modifier"},
-        processing_params={"custom": {"keep": 3}},
-        kb_additional_params={},
-    )
+    await _claim_parse({"custom": {"keep": 3}})
     async with factory() as observer:
         row = await observer.scalar(select(KnowledgeFile))
         assert row.status == "parsing" and row.updated_by == "modifier"

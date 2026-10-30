@@ -73,11 +73,9 @@ class DifyKB(ReadOnlyConnectors):
         kb_id: str,
         *,
         config: KnowledgeBaseConfig,
-        agent_call: bool = False,
         **kwargs,
     ) -> list[dict]:
         """调用 Dify 检索 API 并映射结果；失败时降级为仅 query 请求重试一次。"""
-        del agent_call
         api_url, token, dataset_id = self._get_connection_config(kb_id, config.additional_params)
 
         merged = {**config.query_options, **kwargs}
@@ -127,9 +125,9 @@ class DifyKB(ReadOnlyConnectors):
 
         return self._map_records(response_json)[:top_k]
 
-    def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
+    @classmethod
+    def get_query_params_config(cls) -> dict:
         """声明检索参数配置，键与 Dify retrieval_model 字段一一映射。"""
-        del kb_id, kwargs
         options = [
             {
                 "key": "search_mode",

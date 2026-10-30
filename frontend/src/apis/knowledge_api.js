@@ -112,17 +112,6 @@ export const documentApi = {
   },
 
   /**
-   * 检查知识库中是否存在指定文件名或相对路径
-   * @param {string} kbId - 知识库ID
-   * @param {string} filename - 文件名或相对路径
-   * @returns {Promise} - 存在性检查结果
-   */
-  documentExists: async (kbId, filename) => {
-    const query = buildQuery({ filename })
-    return apiAdminGet(`/api/knowledge/knowledge-bases/${kbId}/documents/exists?${query}`)
-  },
-
-  /**
    * 创建文件夹
    * @param {string} kbId - 知识库ID
    * @param {string} folderName - 文件夹名称
@@ -458,19 +447,6 @@ export const fileApi = {
       kb_id: kbId,
       paths
     })
-  },
-
-  /**
-   * 上传文件
-   * @param {File} file - 文件对象
-   * @param {string} kbId - 知识库ID（可选）
-   * @returns {Promise} - 上传结果
-   */
-  uploadFile: async (file, kbId = null) => {
-    const formData = new FormData()
-    formData.append('file', file)
-
-    return apiAdminPost(fileApi.getUploadUrl(kbId), formData)
   },
 
   /**

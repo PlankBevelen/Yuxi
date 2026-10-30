@@ -12,8 +12,8 @@ from starlette.testclient import TestClient
 
 from yuxi.api.dependencies import auth
 from yuxi.api.routers.public_v1.knowledge_mcp import create_knowledge_mcp
-from yuxi.modules.knowledge.mcp import server as knowledge_mcp
 from yuxi.modules.knowledge.base import KBNotFoundError
+from yuxi.modules.knowledge.mcp import server as knowledge_mcp
 
 HEADERS = {"Authorization": "Bearer yxkey_alice", "Accept": "application/json, text/event-stream"}
 
@@ -246,7 +246,8 @@ def test_api_key_rejection_preserves_response_and_never_enters_mcp(client, monke
     from yuxi.api.routers.public_v1 import knowledge_mcp as api_adapter
 
     monkeypatch.setattr(
-        api_adapter, "get_current_user",
+        api_adapter,
+        "get_current_user",
         AsyncMock(side_effect=HTTPException(403, "当前凭据不能读取知识库", headers={"X-Auth-Rejection": "knowledge"})),
     )
     manager = AsyncMock(side_effect=AssertionError("拒绝请求不得进入 MCP"))
@@ -268,3 +269,22 @@ def test_invalid_delegate_returns_bearer_challenge_before_mcp(client, monkeypatc
     assert response.json() == {"detail": "Invalid Knowledge delegation"}
     assert response.headers["WWW-Authenticate"] == "Bearer"
     manager.assert_not_awaited()
+
+
+def test_internal_tool_failure_records_diagnostic_without_exposing_it(client, monkeypatch):
+    """服务端保留故障类型与栈，MCP 仍只公开稳定错误。"""
+    records = []
+    sink_id = knowledge_mcp.logger.add(
+        lambda message: records.append(message.record), filter=lambda record: record["extra"].get("component") == "knowledge_mcp"
+    )
+    try:
+        monkeypatch.setattr(knowledge_mcp.knowledge_tools, "query_kb", AsyncMock(side_effect=RuntimeError("private diagnostic")))
+        result = rpc(client, "tools/call", {"name": "query_kb", "arguments": {"kb_id": "alice", "query_text": "needle"}}).json()["result"]
+        assert result["isError"] is True
+        assert "private diagnostic" not in str(result)
+        diagnostic = records[-1]
+        assert diagnostic["extra"]["tool_name"] == "query_kb"
+        assert diagnostic["extra"]["error_type"] == "RuntimeError"
+        assert diagnostic["exception"].type is RuntimeError
+    finally:
+        knowledge_mcp.logger.remove(sink_id)

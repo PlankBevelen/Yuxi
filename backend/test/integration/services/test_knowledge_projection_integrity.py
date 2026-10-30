@@ -2,11 +2,11 @@
 
 import asyncio
 import threading
-from datetime import timedelta
-from uuid import uuid4
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -14,16 +14,16 @@ import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from test.integration.support.postgres_schema import create_isolated_manager as _create_isolated_manager
 from test.integration.support.postgres_schema import drop_isolated_schema as _drop_isolated_schema
-
-from yuxi.infrastructure.postgres.manager import pg_manager
-from yuxi.infrastructure.redis import close_async_redis_client
 from yuxi.api.routers.knowledge import management as knowledge_router
 from yuxi.infrastructure.filesystem import await_io
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.infrastructure.redis import close_async_redis_client
+from yuxi.migrations.schema import create_knowledge_tables
 from yuxi.modules.background_jobs.models import BackgroundJobRecord
 from yuxi.modules.knowledge.graphs.service import KnowledgeGraphService
-from yuxi.migrations.schema import create_knowledge_tables, ensure_knowledge_schema
 from yuxi.modules.knowledge.implementations.milvus import MilvusKB
 from yuxi.modules.knowledge.models import (
     KnowledgeBase,
@@ -34,8 +34,8 @@ from yuxi.modules.knowledge.models import (
     KnowledgeProjectionOutbox,
 )
 from yuxi.modules.knowledge.repositories import files
-from yuxi.modules.knowledge.repositories.chunks import KnowledgeChunkRepository
 from yuxi.modules.knowledge.repositories.bases import KnowledgeBaseRepository
+from yuxi.modules.knowledge.repositories.chunks import KnowledgeChunkRepository
 from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
 from yuxi.modules.knowledge.repositories.graphs import KnowledgeGraphRepository
 from yuxi.modules.knowledge.services import projection_cleanup
@@ -67,21 +67,6 @@ async def database(monkeypatch):
     finally:
         await close_async_redis_client()
         await _drop_isolated_schema(schema, admin, engine)
-
-
-@pytest_asyncio.fixture
-async def pg_pool():
-    """为 PostgreSQL 仓储用例重建当前事件循环的连接池。"""
-    pg_manager._initialized = False
-    pg_manager.async_engine = None
-    pg_manager.AsyncSession = None
-    pg_manager.initialize()
-    await ensure_knowledge_schema(pg_manager)
-    yield
-    await pg_manager.async_engine.dispose()
-    pg_manager._initialized = False
-    pg_manager.async_engine = None
-    pg_manager.AsyncSession = None
 
 
 async def _file():
@@ -482,9 +467,13 @@ async def test_http_delete_does_not_remove_original_before_tombstone_commit(data
             KB_BUCKETS={"parsed": "parsed"},
         ),
     )
+    from yuxi.api.errors import domain_error_handler
+    from yuxi.modules.knowledge import runtime
+    from yuxi.shared.errors import DomainError
+
     monkeypatch.setattr(
-        knowledge_router,
-        "knowledge_base_manager",
+        runtime,
+        "knowledge_base",
         SimpleNamespace(
             get_file_basic_info=get_meta,
             delete_file=fail_commit,
@@ -493,14 +482,15 @@ async def test_http_delete_does_not_remove_original_before_tombstone_commit(data
     monkeypatch.setattr(knowledge_router, "_ensure_knowledge_base_supports_documents", AsyncMock())
     app = FastAPI()
     app.include_router(knowledge_router.knowledge, prefix="/api")
+    app.add_exception_handler(DomainError, domain_error_handler)
     app.dependency_overrides[knowledge_router.require_knowledge_base_manage] = lambda: SimpleNamespace(role="superadmin")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
         response = await client.request(
             "DELETE",
             "/api/knowledge/knowledge-bases/kb-test/documents/" + ("batch" if batch else "file-test"),
             **({"json": ["file-test"]} if batch else {}),
         )
-    assert response.status_code == 400
+    assert response.status_code == (400 if batch else 500)
     assert original.read_text() == "original bytes"
     assert await repo.get_by_file_id("file-test") is not None
     async with database() as session:
@@ -520,10 +510,10 @@ async def test_tombstones_are_absent_from_tree_names_hashes_and_counts(database)
             "content_hash": "hash",
         },
     )
-    assert len(await repo.list_children(kb_id="kb-test", parent_id="folder")) == 1
+    assert len((await repo.list_documents(kb_id="kb-test", parent_id="folder"))[0]) == 1
     assert await repo.exists_by_filename(kb_id="kb-test", filename="folder/child.md")
     await repo.mark_deleted(kb_id="kb-test", file_id="child")
-    assert await repo.list_children(kb_id="kb-test", parent_id="folder") == []
+    assert await repo.list_documents(kb_id="kb-test", parent_id="folder") == ([], 0)
     assert await repo.count_children_by_parent_ids(kb_id="kb-test", parent_ids=["folder"]) == {}
     from yuxi.modules.knowledge.repositories.directories import DirectoryRepository
 
@@ -532,7 +522,7 @@ async def test_tombstones_are_absent_from_tree_names_hashes_and_counts(database)
     assert await repo.list_file_ids_by_filename_contains(kb_id="kb-test", filename_pattern="child") == []
     assert not await repo.exists_by_filename(kb_id="kb-test", filename="folder/child.md")
     await repo.mark_deleted(kb_id="kb-test", file_id="folder")
-    assert await repo.list_children(kb_id="kb-test", parent_id=None) == []
+    assert await repo.list_documents(kb_id="kb-test", parent_id=None) == ([], 0)
     assert await repo.count_all() == 0
 
 
@@ -744,7 +734,7 @@ async def test_cancelled_collection_writer_keeps_lock_until_io_settles(database,
         await asyncio.gather(writer, *([cleaner] if cleaner else []), return_exceptions=True)
 
 
-async def test_vector_projection_claim_and_finalize_chunk(pg_pool):
+async def test_vector_projection_claim_and_finalize_chunk(database):
     """真实向量仓储记录状态被领取、标记并完成 chunk 投影。"""
     suffix = uuid4().hex
     kb_id = f"pytest_vector_{suffix}"
@@ -807,7 +797,7 @@ async def test_vector_projection_claim_and_finalize_chunk(pg_pool):
                 await session.delete(kb)
 
 
-async def test_chunk_extraction_details_return_recent_failure_samples(pg_pool):
+async def test_chunk_extraction_details_return_recent_failure_samples(database):
     """真实仓储返回有序失败详情，并在成功后清空失败样本。"""
     suffix = uuid4().hex
     kb_id = f"pytest_extraction_{suffix}"

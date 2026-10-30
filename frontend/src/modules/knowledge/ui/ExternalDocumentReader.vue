@@ -1,17 +1,18 @@
 <template>
-  <section class="external-document-reader" aria-label="飞书文档正文" :aria-busy="loading">
+  <section class="external-document-reader" aria-label="知识文档正文" :aria-busy="loading">
     <div class="reader-header">
       <strong>{{ title || '文档正文' }}</strong>
       <button type="button" class="reader-close" aria-label="关闭文档" @click="$emit('close')">
         关闭
       </button>
     </div>
-    <p v-if="loading" role="status">正在读取飞书文档…</p>
+    <p v-if="loading" role="status">正在读取文档…</p>
     <div v-else-if="error" role="alert">
       <p>{{ error }}</p>
-      <a-button @click="load(0)">重新读取</a-button>
+      <a-button @click="load(initialOffset)">重新读取</a-button>
     </div>
     <template v-else-if="document">
+      <p v-if="startLine" class="reader-position">按引用行号定位当前原文；文档更新后行号可能变化。</p>
       <p class="reader-position">
         第 {{ document.start_line }}–{{ document.end_line }} 行，共 {{ document.total_lines }} 行
       </p>
@@ -19,7 +20,7 @@
         v-if="lines.length"
         class="reader-content"
         :style="{ '--line-number-width': `${String(document.end_line).length}ch` }"
-      ><span v-for="line in lines" :key="line.number" class="reader-line"><span class="reader-line-number" aria-hidden="true">{{ line.number }}</span><span class="reader-line-text">{{ line.text || '\u00a0' }}</span></span></pre>
+      ><span v-for="line in lines" :key="line.number" class="reader-line" :class="{ 'reader-line-highlight': startLine && line.number >= startLine && line.number <= (endLine || startLine) }"><span class="reader-line-number" aria-hidden="true">{{ line.number }}</span><span class="reader-line-text">{{ line.text || '\u00a0' }}</span></span></pre>
       <p v-else class="reader-empty">文档正文为空</p>
       <nav
         v-if="document.has_more_before || document.has_more_after"
@@ -48,16 +49,19 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight } from '@lucide/vue'
 import { queryApi } from '@/apis/knowledge_api'
 
 const props = defineProps({
   kbId: { type: String, required: true },
   fileId: { type: String, required: true },
-  title: { type: String, default: '' }
+  title: { type: String, default: '' },
+  startLine: { type: Number, default: null },
+  endLine: { type: Number, default: null }
 })
 defineEmits(['close'])
+const initialOffset = computed(() => Math.max(0, (props.startLine || 1) - 1))
 const document = ref(null)
 const loading = ref(false)
 const error = ref('')
@@ -82,16 +86,17 @@ async function load(offset = 0) {
     const result = await queryApi.openDocument(props.kbId, props.fileId, offset)
     if (currentRequest === requestId) document.value = result
   } catch (cause) {
-    if (currentRequest === requestId) error.value = cause.message || '读取飞书文档失败'
+    if (currentRequest === requestId) error.value = cause.message || '读取文档失败'
   } finally {
     if (currentRequest === requestId) loading.value = false
   }
 }
 watch(
-  () => [props.kbId, props.fileId],
-  () => load(0),
+  () => [props.kbId, props.fileId, props.startLine],
+  () => load(initialOffset.value),
   { immediate: true }
 )
+onUnmounted(() => { requestId += 1 })
 </script>
 
 <style scoped lang="less">
@@ -138,6 +143,9 @@ watch(
   display: grid;
   grid-template-columns: max(2ch, var(--line-number-width)) minmax(0, 1fr);
   gap: 12px;
+}
+.reader-line-highlight {
+  background: var(--main-10);
 }
 .reader-line-number {
   color: var(--color-text-tertiary);
