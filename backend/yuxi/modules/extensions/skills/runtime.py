@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -85,26 +86,65 @@ async def resolve_runtime_skills_for_context(
             raise PermissionError("智能体专属 Skill 不可用")
         context_preload_skills = normalize_string_list([*context_preload_skills, bound_slug])
     preloaded_skills = expand_skill_closure(context_preload_skills, runtime_skills)
-    preloaded_contents = (
-        await asyncio.to_thread(_read_preloaded_skill_contents, preloaded_skills, skill_items_by_slug) if preloaded_skills else {}
-    )
+    metadata = {
+        slug: {
+            "source_scope": skill_items_by_slug[slug].source_scope,
+            "version": skill_items_by_slug[slug].version,
+            "content_hash": skill_items_by_slug[slug].content_hash,
+            "source_identity": _skill_source_identity(skill_items_by_slug[slug]),
+        }
+        for slug in effective_skills
+    }
+    previous = getattr(context, "skill_runtime_snapshot", None) or {}
+    previous_metadata = previous.get("skill_metadata", {})
+    previous_contents = previous.get("preloaded_skill_contents", {})
+    preloaded_contents = {}
+    for slug in preloaded_skills:
+        if slug not in previous_contents:
+            continue
+        current = metadata[slug]
+        old = previous_metadata.get(slug)
+        if current["source_scope"] == "personal" and old == current:
+            preloaded_contents[slug] = previous_contents[slug]
+        elif current["source_scope"] == "agent_bound" and old is not None:
+            # 同一行修订沿用本 Run 准备正文；新身份不得与旧正文拼接。
+            same_revision = (
+                old["source_scope"] == "agent_bound"
+                and old["version"] == current["version"]
+                and old["content_hash"] == current["content_hash"]
+                and old["source_identity"].split(":", 1)[0] == current["source_identity"]
+            )
+            if same_revision:
+                preloaded_contents[slug] = previous_contents[slug]
+                metadata[slug] = dict(old)
+    unread = [slug for slug in preloaded_skills if slug not in preloaded_contents]
+    if unread:
+        preloaded_contents.update(await asyncio.to_thread(_read_preloaded_skill_contents, unread, skill_items_by_slug))
+        if any(_skill_source_identity(skill_items_by_slug[slug]) != metadata[slug]["source_identity"] for slug in unread):
+            raise RuntimeError("读取 Skill 期间来源发生变化")
+        for slug in unread:
+            if metadata[slug]["source_scope"] != "personal":
+                digest = hashlib.sha256(preloaded_contents[slug].encode("utf-8")).hexdigest()
+                metadata[slug]["source_identity"] += f":{digest}"
     return {
         "capability_limited": limited,
         "context_skills": context_skills,
         "context_preload_skills": context_preload_skills,
         "effective_skills": effective_skills,
         "runtime_skills": runtime_skills,
-        "skill_metadata": {
-            slug: {
-                "source_scope": skill_items_by_slug[slug].source_scope,
-                "version": skill_items_by_slug[slug].version,
-                "content_hash": skill_items_by_slug[slug].content_hash,
-            }
-            for slug in effective_skills
-        },
+        "skill_metadata": metadata,
         "preloaded_skills": preloaded_skills,
         "preloaded_skill_contents": preloaded_contents,
     }
+
+
+def _skill_source_identity(item) -> str:
+    """识别共享行或个人根文件的当前来源，避免同名替换复用旧提示。"""
+    if item.source_scope != "personal":
+        return str(item.id)
+    source_dir = Path(item.source_dir)
+    with open_regular_file_fd(Path(source_dir.anchor), (*source_dir.parts[1:], "SKILL.md")) as (_, stat):
+        return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
 
 
 def build_runtime_skills(skills: list) -> dict[str, RuntimeSkill]:

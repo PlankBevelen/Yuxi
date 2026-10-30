@@ -1,5 +1,6 @@
 """知识文档元数据、正文、窗口及原件读取用例，不装配检索执行器。"""
 
+import json
 import re
 from typing import Any
 from urllib.parse import unquote
@@ -10,7 +11,7 @@ from yuxi.infrastructure.observability.logging import logger
 from yuxi.modules.knowledge.schemas import FindOutputSchema, FindWindowSchema
 from yuxi.modules.knowledge.utils.kb_utils import sanitize_processing_params
 from yuxi.shared.datetime import utc_isoformat
-from yuxi.shared.errors import InvalidOperationError
+from yuxi.shared.errors import ContentTooLargeError, InvalidOperationError
 from yuxi.shared.files import detect_media_type
 
 
@@ -270,20 +271,40 @@ def build_open_file_window(content: str, *, offset: int = 0, limit: int = 800) -
     total_lines = len(lines)
     start = min(max(int(offset), 0), total_lines)
     window_size = min(max(int(limit), 1), 2000)
-    selected = lines[start : start + window_size]
-    end = start + len(selected)
+    # 预算包含行号、JSON 转义和窗口元数据，不能截断单行正文。
+    byte_budget = 64 * 1024
+    selected = [f"{start + index + 1:6d}\t{line}" for index, line in enumerate(lines[start : start + window_size])]
 
-    return {
-        "start_line": start + 1 if selected else 0,
-        "end_line": end,
-        "total_lines": total_lines,
-        "offset": start,
-        "window_size": window_size,
-        "has_more_before": start > 0,
-        "has_more_after": end < total_lines,
-        "next_offset": end if end < total_lines else None,
-        "content": "\n".join(f"{start + idx + 1:6d}\t{line}" for idx, line in enumerate(selected)),
-    }
+    def render(count: int) -> dict[str, Any]:
+        """统一装配指定完整行前缀的响应。"""
+        end = start + count
+        return {
+            "start_line": start + 1 if count else 0,
+            "end_line": end,
+            "total_lines": total_lines,
+            "offset": start,
+            "window_size": window_size,
+            "has_more_before": start > 0,
+            "has_more_after": end < total_lines,
+            "next_offset": end if end < total_lines else None,
+            "content": "\n".join(selected[:count]),
+        }
+
+    result = render(0)
+    low, high = 1, len(selected)
+    while low <= high:
+        count = (low + high) // 2
+        candidate = render(count)
+        # MCP 同时携带文本和结构化结果；留出外层 JSON-RPC 标头空间。
+        wire = {"content": [{"type": "text", "text": json.dumps(candidate, ensure_ascii=False)}], "structuredContent": candidate}
+        if len(json.dumps(wire, ensure_ascii=True).encode("utf-8")) > byte_budget - 1024:
+            high = count - 1
+        else:
+            result = candidate
+            low = count + 1
+    if selected and result["end_line"] == start:
+        raise ContentTooLargeError("文档单行超过读取窗口字节上限", code="document_line_too_large")
+    return result
 
 
 def build_find_file_windows(

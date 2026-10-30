@@ -1,7 +1,5 @@
-from yuxi.modules.agents.runtime.state import BaseState
+from yuxi.modules.agents.runtime.middlewares.cooperation import CooperationState
 
 
-class ChatBotState(BaseState):
-    """保存与 checkpoint 一起提交的协作消息消费位置。"""
-
-    cooperation_cursor: int
+class ChatBotState(CooperationState):
+    """清理图也保留协作中间件拥有的 checkpoint 状态。"""

@@ -53,7 +53,7 @@ OpenCode 1.x 将服务直接放在 `mcp.yuxi-knowledge` 下，省略 `codemode`�
 
 ## 调用结果
 
-MCP 初始化返回工具使用指引，每个工具的说明包含参数选择、结果串联和分页方式。`query_kb` 检索正文片段，`search_file` 搜索文件名；文件名没有命中时仍可尝试正文检索。用结果中的 `kb_id`、`file_id` 定位并打开原文，引用时保留文件 ID 和行号。读取长文时用 `next_offset` 继续，并省略优先级更高的 `line`；文件列表在 `has_more` 为真时将 `offset` 加上 `limit` 继续。
+MCP 初始化返回工具使用指引，每个工具的说明包含参数选择、结果串联和分页方式。`query_kb` 检索正文片段，`search_file` 搜索文件名；文件名没有命中时仍可尝试正文检索。用结果中的 `kb_id`、`file_id` 定位并打开原文，引用时保留文件 ID 和行号。读取长文时用 `next_offset` 继续，并省略优先级更高的 `line`；文件列表在 `has_more` 为真时将 `offset` 加上 `limit` 继续。正文窗口同时受字节上限约束，可能短于请求行数；单行超过上限时返回错误，不丢弃该行。
 
 成功响应同时提供 JSON 文本 `content[0].text` 和标准 MCP `structuredContent`。`list_kbs` 的文本仍是数组，结构化字段为 `{"knowledge_bases": [...]}`；其他工具的结构化字段与解析后的 JSON 文本对象相同。程序客户端可以直接读取结构化字段，文本客户端继续使用原有格式。
 

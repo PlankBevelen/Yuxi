@@ -1,5 +1,7 @@
 """模型和工具执行边界重新读取身份与授权。"""
 
+from copy import copy
+
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
@@ -10,12 +12,14 @@ from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.agents.models.runs import AgentRun
 from yuxi.modules.agents.models.sessions import Session
 from yuxi.modules.agents.repositories.definitions import AgentRepository
-from yuxi.modules.agents.runtime.context import refresh_agent_context_resources
+from yuxi.modules.agents.runtime.context import BaseContext, refresh_agent_context_resources
+from yuxi.modules.agents.runtime.middlewares.skills import injected_skill_identity
 from yuxi.modules.agents.runtime.state import BaseState, RuntimeWarning
-from yuxi.modules.extensions.mcp.service import available_mcp_servers, runtime_mcp_failure_message
+from yuxi.modules.extensions.mcp.service import available_mcp_servers, runtime_mcp_failure
 from yuxi.modules.extensions.skills.runtime import connected_skills, expand_skill_closure, sync_agent_context_skills
 from yuxi.modules.extensions.tools.builtin import BASE_TOOL_NAMES
 from yuxi.modules.identity.models import User
+from yuxi.shared.errors import PermissionDeniedError
 
 
 class AgentExecutionRevoked(PermissionError):
@@ -57,11 +61,15 @@ class RuntimeAuthorizationMiddleware(AgentMiddleware):
             return await handler(request)
         try:
             return await handler(request)
-        except (AgentExecutionRevoked, GraphBubbleUp):
+        except GraphBubbleUp:
             raise
         except Exception as exc:
-            reason = runtime_mcp_failure_message(exc)
-            context.mcp_unavailable[server] = reason
+            try:
+                reason, permanent = runtime_mcp_failure(exc)
+            except (PermissionError, PermissionDeniedError) as denied:
+                raise AgentExecutionRevoked("MCP 工具调用权限被拒绝") from denied
+            if permanent:
+                context.mcp_unavailable[server] = reason
             logger.warning(
                 "MCP tool unavailable: server={}, run_id={}, error_type={}, reason={}",
                 server,
@@ -116,17 +124,29 @@ def tool_allowed(context, name: str, state: dict, mcp_policy: dict[str, set[str]
 
 async def refresh_execution_authorization(context, *, state=None) -> dict[str, set[str]]:
     """在实际模型与摘要请求前复查身份、解析当前权限并同步 Skill 投影。"""
-    mcp_policy = await _execution_mcp_policy(context, state=state)
+    injected = injected_skill_identity.get()
+    if injected is None:
+        mcp_policy = await _execution_mcp_policy(context, state=state)
+    else:
+        mcp_policy = await _refresh_execution_resources(context, state=state)
+        current = context.skill_runtime_snapshot["skill_metadata"]
+        if any(current.get(slug) != metadata for slug, metadata in injected.items()):
+            raise AgentExecutionRevoked("已注入的 Skill 权限或来源已改变")
     await sync_agent_context_skills(context)
     return mcp_policy
 
 
-async def _refresh_execution_resources(context, *, state=None) -> dict[str, set[str]]:
+async def _refresh_execution_resources(context: BaseContext, *, state=None) -> dict[str, set[str]]:
     """模型与工具边界刷新资源和 Skill 快照，并解析当前 MCP 策略。"""
+    refreshed = copy(context)
     async with pg_manager.get_async_session_context() as db:
-        user, agent, _ = await _require_execution_actor(context, db=db)
-        await refresh_agent_context_resources(context, db=db, user=user, agent=agent)
-        return await _resolve_mcp_policy(context, db=db, user=user, state=state)
+        user, agent, _ = await _require_execution_actor(refreshed, db=db)
+        await refresh_agent_context_resources(refreshed, db=db, user=user, agent=agent)
+        policy = await _resolve_mcp_policy(refreshed, db=db, user=user, state=state)
+    resource_fields = context.get_resource_fields()
+    for name in (*resource_fields, "skill_runtime_snapshot", "_resource_selections", "_capability_limited", "agent_slug"):
+        setattr(context, name, getattr(refreshed, name))
+    return policy
 
 
 async def _execution_mcp_policy(context, *, state=None) -> dict[str, set[str]]:

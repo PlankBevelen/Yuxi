@@ -94,7 +94,7 @@ def test_shared_summary_factory_uses_one_threshold(monkeypatch: pytest.MonkeyPat
     assert captured["session_id"] == "summary-thread"
     assert captured["uid"] == "summary-uid"
     assert captured["trigger"] == ("tokens", 96 * 1024)
-    assert captured["trim_tokens_to_summarize"] == 96 * 1024
+    assert "trim_tokens_to_summarize" not in captured
     assert "l1_l2_trigger_ratio" not in captured
 
 
@@ -254,3 +254,66 @@ async def test_image_fallback_uses_authorized_tools_from_shipping_middleware_ord
     response = await handler(request)
     assert seen_tools == (["ocr_parse_file"] if enabled else [])
     assert [call["name"] for call in response.result[0].tool_calls] == seen_tools
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_actual_authorized_and_bridged_model_request(monkeypatch):
+    """统计的工具和图片消息与 provider 收到的同一请求一致。"""
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_openai import ChatOpenAI
+    from yuxi.modules.agents.runtime.middlewares import authorization
+    from yuxi.modules.extensions.tools.builtin.ocr_parse_file import ocr_parse_file
+
+    context = _context()
+    context.tools, context.mcps = [], []
+    context.registered_builtin_tool_names = {"ocr_parse_file"}
+    context.mcp_tool_servers = {}
+    context.skill_runtime_snapshot = {"preloaded_skills": [], "effective_skills": [], "runtime_skills": {}}
+    _patch_common_graph_deps(monkeypatch, chatbot_graph, {})
+    monkeypatch.setattr(chatbot_graph, "create_memory_middleware", AsyncMock(return_value=None))
+    monkeypatch.setattr(chatbot_graph, "create_cooperation_middleware", lambda _context: None)
+    monkeypatch.setattr(authorization, "refresh_execution_authorization", AsyncMock(return_value={}))
+    middlewares = await chatbot_graph._build_middlewares(context, object())
+    wrappers = [
+        m
+        for m in middlewares
+        if isinstance(
+            m,
+            (
+                authorization.RuntimeAuthorizationMiddleware,
+                chatbot_graph.ImageInputCompatibilityMiddleware,
+                chatbot_graph.TokenUsageMiddleware,
+            ),
+        )
+    ]
+    received = []
+
+    async def provider(request):
+        received.append(request)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    handler = provider
+    for middleware in reversed(wrappers):
+        previous = handler
+
+        async def handler(request, middleware=middleware, previous=previous):
+            return await middleware.awrap_model_call(request, previous)
+
+    image = ToolMessage(content_blocks=[{"type": "image", "base64": "abc", "mime_type": "image/png"}], tool_call_id="image")
+    request = ModelRequest(
+        model=ChatOpenAI(model="fixture", api_key="test", metadata={"yuxi_provider_id": "fixture"}),
+        tools=[ocr_parse_file],
+        messages=[image],
+        runtime=SimpleNamespace(context=context),
+        state={"messages": [image]},
+    )
+    response = await handler(request)
+    actual = received[0]
+    usage = response.command.update["token_usage"]
+    counter = next(m for m in wrappers if isinstance(m, chatbot_graph.TokenUsageMiddleware))
+    assert actual.tools == []
+    assert [message.type for message in actual.messages] == ["tool", "human"]
+    assert usage["tool_count"] == len(actual.tools)
+    assert usage["llm_message_count"] == len(actual.messages)
+    assert usage["llm_input_tokens"] == counter._count_tokens(actual.messages, tools=actual.tools)

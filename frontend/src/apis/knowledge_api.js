@@ -342,12 +342,12 @@ export const graphBuildApi = {
 // =============================================================================
 
 export const queryApi = {
-  openDocument: async (kbId, fileId, offset = 0) => {
+  openDocument: async (kbId, fileId, offset = 0, windowSize = 200) => {
     return apiPost('/api/v1/knowledge/tools/open_kb_document', {
       kb_id: kbId,
       file_id: fileId,
       offset,
-      window_size: 200
+      window_size: windowSize
     })
   },
 

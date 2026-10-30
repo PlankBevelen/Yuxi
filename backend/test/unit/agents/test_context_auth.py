@@ -709,3 +709,32 @@ async def test_workspace_prompt_appends_only_available_agent_context(monkeypatch
     await context_module._append_workspace_agent_prompt(context)
     assert context.system_prompt == "快照中的系统提示词" + (f"\n\n{workspace_text}" if workspace_text else "")
     assert context.thread_id == "thread-1" and context.uid == "user-1"
+@pytest.mark.asyncio
+async def test_refresh_does_not_pair_replaced_bound_skill_with_old_body(monkeypatch):
+    """专属 Skill 同名替换后，新身份必须对应新正文。"""
+    from yuxi.modules.agents.runtime import context as context_module
+    from yuxi.modules.extensions.skills import runtime as skill_runtime
+
+    context = context_module.BaseContext()
+    context.skill_runtime_snapshot = {
+        "skill_metadata": {"bound": {"source_scope": "agent_bound", "source_identity": "old"}},
+        "preloaded_skill_contents": {"bound": "old body"},
+    }
+    replacement = {
+        "skill_metadata": {"bound": {"source_scope": "agent_bound", "source_identity": "new"}},
+        "preloaded_skill_contents": {"bound": "new body"},
+        "context_skills": ["bound"],
+        "context_preload_skills": ["bound"],
+        "capability_limited": False,
+    }
+
+    async def normalize(selections, **_kwargs):
+        return selections
+
+    async def resolve(*_args, **_kwargs):
+        return replacement
+
+    monkeypatch.setattr(context_module, "normalize_agent_context_config", normalize)
+    monkeypatch.setattr(skill_runtime, "resolve_runtime_skills_for_context", resolve)
+    await context_module.refresh_agent_context_resources(context, db=None, user=None)
+    assert context.skill_runtime_snapshot["preloaded_skill_contents"]["bound"] == "new body"

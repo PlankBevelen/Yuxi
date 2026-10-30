@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from yuxi.infrastructure.filesystem import ensure_within_root, open_directory_fd, open_regular_file_fd, publish_directory_fd
+from yuxi.infrastructure.filesystem import await_io, ensure_within_root, open_directory_fd, open_regular_file_fd, publish_directory_fd
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.modules.agents.runtime.sandbox.download import download_sandbox_directory
 from yuxi.modules.extensions.skills.install_draft import consume_installed_draft_items, load_and_select_draft_items
@@ -82,12 +82,7 @@ async def install_personal_skills_from_source(
         raise ValueError("Skill 来源不能为空")
     if source.startswith("/"):
         with tempfile.TemporaryDirectory(prefix=".skill-install-") as tmp:
-            source_dir = await asyncio.to_thread(
-                _download_sandbox_skill,
-                source,
-                uid,
-                Path(tmp),
-            )
+            source_dir = await await_io(asyncio.to_thread(_download_sandbox_skill, source, uid, Path(tmp)))
             item = await install_personal_skill_dir(uid, source_dir)
             return [item.slug], []
     if not skill_names:
@@ -125,12 +120,7 @@ async def install_personal_skill_dir(
     expected_slug: str | None = None,
 ) -> ResolvedSkill:
     """将一个 Skill 原子安装到当前用户个人持久源。"""
-    return await asyncio.to_thread(
-        _install_personal_skill_dir_sync,
-        uid,
-        Path(source_dir),
-        expected_slug=expected_slug,
-    )
+    return await await_io(asyncio.to_thread(_install_personal_skill_dir_sync, uid, Path(source_dir), expected_slug=expected_slug))
 
 
 async def read_personal_skill_file(uid: str, slug: str, relative_path: str) -> dict[str, Any]:
@@ -157,7 +147,7 @@ async def delete_personal_skill(uid: str, slug: str) -> None:
     skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
     if not skill_dir.is_dir():
         raise ValueError("个人 Skill 不存在")
-    await asyncio.to_thread(shutil.rmtree, skill_dir)
+    await await_io(asyncio.to_thread(shutil.rmtree, skill_dir))
 
 
 def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:

@@ -24,15 +24,15 @@
 | 2 | `SteerMiddleware` | 在安全边界发现待接替请求 |
 | 3 | `create_agent_filesystem_middleware` | 提供 Workdir、User Data、Skills 文件后端，并卸载过大的工具结果 |
 | 4 | `SkillsMiddleware` | 注入 Skill 说明，按激活状态开放依赖 |
-| 5 | `YuxiMemoryMiddleware` | Memory 开关开启且 `MEMORY.md` 有内容时，注入用户记忆并提供受限工具 |
+| 5 | `YuxiMemoryMiddleware` | Memory 开关开启时，注入用户记忆并提供受限工具 |
 | 6 | `CooperationMiddleware` | 所有持久 Run 提供统一 Session 协作工具 |
 | 7 | `YuxiSummarizationMiddleware` | 先确定性压缩工具结果，仍达到同一阈值时生成摘要 |
 | 8 | `PatchToolCallsMiddleware` | 修正部分工具调用消息形态 |
 | 9 | `NetworkRetryMiddleware` | 网络错误按预算、其他可重试模型错误按次数重试，耗尽后抛出异常 |
-| 10 | `TokenUsageMiddleware` | 记录近似上下文和主模型实际用量 |
-| 11 | 工具审批 middleware | 默认模式下审批 Project 外的文件写入和命令执行；当前 Project 内的写/编辑自动放行 |
-| 12 | `RuntimeAuthorizationMiddleware` | 准备模型输入时刷新资源，实际请求前同步投影；返回时先于审批复查身份 |
-| 13 | `ImageInputCompatibilityMiddleware` | 桥接工具读取图片与模型输入格式；必要时回退 OCR |
+| 10 | 工具审批 middleware | 默认模式下审批 Project 外的文件写入和命令执行；当前 Project 内的写/编辑自动放行 |
+| 11 | `RuntimeAuthorizationMiddleware` | 准备模型输入时刷新资源，实际请求前同步投影；返回时先于审批复查身份 |
+| 12 | `ImageInputCompatibilityMiddleware` | 桥接工具读取图片与模型输入格式；必要时回退 OCR |
+| 13 | `TokenUsageMiddleware` | 记录授权和图片转换后的近似上下文及主模型实际用量 |
 
 模型重试耗尽后，异常进入 Run 失败通道，持久化 `failed` 状态与错误原因；已有部分输出保留错误元数据。
 

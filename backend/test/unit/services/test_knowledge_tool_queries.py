@@ -588,3 +588,69 @@ def test_mcp_capabilities_distinguish_document_management_from_reading(kb_type, 
     result = tools.list_kbs([{"kb_id": "source", "name": "source", "kb_type": kb_type}], include_capabilities=True)
     assert result[0]["supports_documents"] is manage
     assert result[0]["supports_document_read"] is read
+
+
+def test_document_window_bounds_json_bytes_without_losing_lines():
+    import json
+    from yuxi.modules.knowledge.services.documents import build_open_file_window
+
+    lines = ['多字节"\\' * 500 for _ in range(4)]
+    first = build_open_file_window("\n".join(lines), limit=4)
+    assert len(json.dumps(first, ensure_ascii=True).encode("utf-8")) <= 64 * 1024
+    assert first["next_offset"] == first["end_line"] < len(lines)
+    second = build_open_file_window("\n".join(lines), offset=first["next_offset"], limit=4)
+    recovered = [line.split("\t", 1)[1] for line in (first["content"] + "\n" + second["content"]).splitlines()]
+    assert recovered == lines[: len(recovered)]
+
+
+def test_document_window_rejects_oversized_single_line():
+    from yuxi.modules.knowledge.services.documents import build_open_file_window
+    from yuxi.shared.errors import ContentTooLargeError
+
+    with pytest.raises(ContentTooLargeError, match="单行超过") as failure:
+        build_open_file_window("字" * 20000)
+    assert failure.value.code == "document_line_too_large"
+
+
+@pytest.mark.parametrize("line", ['多字节😀"\\\t' * 400, "ascii" * 700, ""])
+def test_document_windows_preserve_complete_lines_and_mcp_wire_budget(line):
+    """真实 MCP 结果双份承载正文，连续读取不得漏行或超过 wire 上限。"""
+    import json
+
+    from mcp.types import CallToolResult, JSONRPCResponse, TextContent
+
+    from yuxi.modules.knowledge.services.documents import build_open_file_window
+
+    lines = [f"{index}:{line}" for index in range(30)]
+    content = "\n".join(lines)
+    recovered = []
+    offset = 0
+    while offset is not None:
+        page = build_open_file_window(content, offset=offset, limit=30)
+        result = CallToolResult(content=[TextContent(type="text", text=json.dumps(page, ensure_ascii=False))], structuredContent=page)
+        wire = JSONRPCResponse(jsonrpc="2.0", id=1, result=result.model_dump(by_alias=True, exclude_none=True))
+        assert len(wire.model_dump_json(by_alias=True, exclude_none=True).encode()) <= 64 * 1024
+        expected_count = page["end_line"] - offset
+        assert page["start_line"] == offset + 1
+        assert expected_count > 0
+        assert page["content"].splitlines() == [f"{index + 1:6d}\t{lines[index]}" for index in range(offset, page["end_line"])]
+        recovered.extend(row.split("\t", 1)[1] for row in page["content"].splitlines())
+        offset = page["next_offset"]
+        assert offset == (page["end_line"] if page["has_more_after"] else None)
+    assert recovered == lines
+
+
+def test_document_window_stops_before_oversized_line_and_allows_following_content():
+    """超长行不可截断，前缀和后续短行仍可独立读取。"""
+    from yuxi.modules.knowledge.services.documents import build_open_file_window
+    from yuxi.shared.errors import ContentTooLargeError
+
+    content = "first\n" + "字" * 40000 + "\nlast"
+    first = build_open_file_window(content)
+    assert first["content"] == "     1\tfirst"
+    assert first["next_offset"] == 1
+    with pytest.raises(ContentTooLargeError, match="文档单行超过读取窗口字节上限"):
+        build_open_file_window(content, offset=1)
+    last = build_open_file_window(content, offset=2)
+    assert last["content"] == "     3\tlast"
+    assert last["next_offset"] is None

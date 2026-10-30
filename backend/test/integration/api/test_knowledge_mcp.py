@@ -69,6 +69,8 @@ async def call_tool(client, headers, name, arguments, *, error=False):
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
     )
     assert response.status_code == 200, response.text
+    if name == "open_kb_document" and not error:
+        assert len(response.content) <= 64 * 1024
     result = response.json()["result"]
     assert result["isError"] is error, result
     text = result["content"][0]["text"]
@@ -141,3 +143,33 @@ async def test_mcp_real_auth_rejects_agents_invalid_and_revoked_keys(test_client
         "/api/mcp", headers={**key.headers, **accept}, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     )
     assert response.status_code == 401
+
+
+async def test_mcp_document_window_has_byte_limit_and_current_permission(
+    test_client, admin_headers, api_key_factory, mcp_document, standard_user
+):
+    """真实 MCP 和持久权限下，变长窗口可连续回读且不能越权。"""
+    kb_id, file_id = mcp_document
+    lines = [f"line-{index} " + "多字节正文" * 500 for index in range(8)]
+    await get_minio_client().aupload_file(
+        MinIOClient.KB_BUCKETS["parsed"], f"{kb_id}/parsed/{file_id}.md", "\n".join(lines).encode(), content_type="text/markdown"
+    )
+    owner = await api_key_factory({"request_id": str(uuid.uuid4()), "name": "bounded MCP document", "access_level": "knowledge"})
+    offset = 0
+    recovered = []
+    while offset is not None:
+        payload = json.loads(
+            await call_tool(test_client, owner.headers, "open_kb_document", {"kb_id": kb_id, "file_id": file_id, "offset": offset})
+        )
+        assert len(json.dumps(payload, ensure_ascii=True).encode()) < 64 * 1024
+        recovered.extend(line.split("\t", 1)[1] for line in payload["content"].splitlines())
+        offset = payload["next_offset"]
+    assert recovered == lines
+
+    other = await api_key_factory(
+        {"request_id": str(uuid.uuid4()), "name": "bounded MCP denied", "access_level": "knowledge"},
+        owner_headers=standard_user["headers"],
+        cleanup_headers=admin_headers,
+    )
+    failure = await call_tool(test_client, other.headers, "open_kb_document", {"kb_id": kb_id, "file_id": file_id}, error=True)
+    assert "404" in failure and "多字节正文" not in failure

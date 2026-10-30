@@ -1485,7 +1485,7 @@ defineExpose({
   }
 
   &::placeholder {
-    color: var(--gray-600);
+    color: var(--gray-300);
   }
 
   &.mention-editor {
@@ -1496,7 +1496,7 @@ defineExpose({
       position: absolute;
       left: 0;
       top: 0;
-      color: var(--gray-600);
+      color: var(--gray-300);
       pointer-events: none;
     }
   }

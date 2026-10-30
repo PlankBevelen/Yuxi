@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from pathlib import PurePosixPath
 from typing import Annotated, Any, NotRequired
 
@@ -19,6 +20,10 @@ from yuxi.modules.extensions.skills.package import is_valid_skill_slug, normaliz
 from yuxi.modules.extensions.skills.resolved import RuntimeSkill
 from yuxi.modules.extensions.skills.runtime import build_dependency_bundle
 from yuxi.modules.workspace.runtime_paths import PERSONAL_SKILLS_PATH, SHARED_SKILLS_PATH
+
+# 单次模型请求固定实际注入的 Skill 来源；重试不能以刷新后的权限替代此事实。
+injected_skill_identity: ContextVar[dict[str, dict] | None] = ContextVar("injected_skill_identity", default=None)
+_SKILL_SOURCES = [f"{SHARED_SKILLS_PATH}/", f"{PERSONAL_SKILLS_PATH}/"]
 
 
 def _activated_skills_reducer(left: list[str] | None, right: list[str] | None) -> list[str]:
@@ -43,59 +48,36 @@ class SkillsMiddleware(AgentMiddleware):
 
     state_schema = SkillsState
 
-    def __init__(
-        self,
-        *,
-        enable_skills_prompt: bool = True,
-        skills_sources_for_prompt: list[str] | None = None,
-    ):
-        """初始化中间件
-
-        Args:
-            enable_skills_prompt: 是否启用 skills 提示段注入（默认 True）
-            skills_sources_for_prompt: skills 来源路径（默认展示共享投影与个人 Workspace）
-        """
-        super().__init__()
-        self.enable_skills_prompt = enable_skills_prompt
-        self.skills_sources_for_prompt = skills_sources_for_prompt or [
-            f"{SHARED_SKILLS_PATH}/",
-            f"{PERSONAL_SKILLS_PATH}/",
-        ]
-
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
         """包装模型调用，处理 skills 提示词注入、动态激活和依赖展开"""
         runtime_context = request.runtime.context
 
         snapshot = runtime_context.skill_runtime_snapshot
-        if self.enable_skills_prompt:
-            if snapshot is not None:
-                effective_skills = snapshot["effective_skills"]
-                preloaded_skills = self._get_preloaded_skills(runtime_context)
-                preloaded_set = set(preloaded_skills)
-                prompt_sections: list[str] = []
-                lazy_skills = [slug for slug in effective_skills if slug not in preloaded_set]
-                if lazy_skills:
-                    skills_meta = self._collect_prompt_metadata(lazy_skills, runtime_context)
-                    if skills_meta:
-                        prompt_sections.append(self._build_skills_section(skills_meta))
-                if preloaded_skills:
-                    prompt_sections.append(self._build_preloaded_skills_section(preloaded_skills, runtime_context))
-                if prompt_sections:
-                    system_message = append_to_system_message(getattr(request, "system_message", None), "\n\n".join(prompt_sections))
-                    request = request.override(system_message=system_message)
+        runtime_skills = snapshot["runtime_skills"] if snapshot is not None else {}
+        effective_skills = set(snapshot["effective_skills"]) if snapshot is not None else set()
+        preloaded_skills = snapshot["preloaded_skills"] if snapshot is not None else []
+        if snapshot is not None:
+            preloaded_set = set(preloaded_skills)
+            prompt_sections: list[str] = []
+            lazy_skills = [slug for slug in snapshot["effective_skills"] if slug not in preloaded_set]
+            if lazy_skills:
+                prompt_sections.append(self._build_skills_section([runtime_skills[slug] for slug in lazy_skills]))
+            if preloaded_skills:
+                prompt_sections.append(self._build_preloaded_skills_section(preloaded_skills, runtime_context))
+            if prompt_sections:
+                system_message = append_to_system_message(getattr(request, "system_message", None), "\n\n".join(prompt_sections))
+                request = request.override(system_message=system_message)
 
         state = request.state if isinstance(request.state, dict) else {}
         activated = state.get("activated_skills", []) or []
         if not isinstance(activated, list):
             activated = []
 
-        effective_skills = self._get_effective_skills(runtime_context)
         activated = [slug for slug in normalize_string_list(activated) if slug in effective_skills]
-        activated = _activated_skills_reducer(self._get_preloaded_skills(runtime_context), activated)
+        activated = _activated_skills_reducer(preloaded_skills, activated)
 
-        deps_bundle = build_dependency_bundle(activated, self._get_runtime_skills(runtime_context))
-        configured_mcps = set(getattr(runtime_context, "mcps", []))
-        server_names = [name for name in deps_bundle["mcps"] if name not in configured_mcps]
+        deps_bundle = build_dependency_bundle(activated, runtime_skills)
+        server_names = normalize_string_list([*getattr(runtime_context, "mcps", []), *deps_bundle["mcps"]])
         loaded_mcps = {}
         if server_names:
             if getattr(runtime_context, "mcp_tool_servers", None) is None:
@@ -113,18 +95,22 @@ class SkillsMiddleware(AgentMiddleware):
         active_tools = {}
         for server, tools in loaded_mcps.items():
             for tool in tools:
-                if tool.name in registered_names or tool.name in active_tools:
+                if tool.name in registered_names:
+                    if runtime_context.mcp_tool_servers.get(tool.name) == server:
+                        continue
+                    raise RuntimeError(f"Skill MCP 工具名冲突：{tool.name}")
+                if tool.name in active_tools:
                     raise RuntimeError(f"Skill MCP 工具名冲突：{tool.name}")
                 active_tools[tool.name] = tool
                 runtime_context.mcp_tool_servers[tool.name] = server
         if active_tools:
             request = request.override(tools=[*request.tools, *active_tools.values()])
-        return await handler(request)
-
-    def _collect_prompt_metadata(self, slugs: list[str], runtime_context) -> list[RuntimeSkill]:
-        """收集指定 slugs 的提示词元数据"""
-        runtime_skills = self._get_runtime_skills(runtime_context)
-        return [runtime_skills[slug] for slug in slugs]
+        identity = {slug: dict(metadata) for slug, metadata in (snapshot or {}).get("skill_metadata", {}).items()}
+        token = injected_skill_identity.set(identity)
+        try:
+            return await handler(request)
+        finally:
+            injected_skill_identity.reset(token)
 
     def _process_tool_call_result(self, result: Any, request: ToolCallRequest) -> Any:
         """处理工具调用结果，检查并处理 skill 动态激活"""
@@ -146,7 +132,8 @@ class SkillsMiddleware(AgentMiddleware):
         if not slug:
             return result
 
-        if slug not in self._get_effective_skills(request.runtime.context):
+        snapshot = request.runtime.context.skill_runtime_snapshot
+        if snapshot is None or slug not in snapshot["effective_skills"]:
             logger.warning(f"SkillsMiddleware: deny skill activation for invisible slug: {slug}")
             return result
 
@@ -203,24 +190,6 @@ class SkillsMiddleware(AgentMiddleware):
                 return relative.parts[0]
         return None
 
-    def _get_effective_skills(self, runtime_context) -> set[str]:
-        """读取完整快照的有效 Skill，未准备阶段返回空集合。"""
-        snapshot = runtime_context.skill_runtime_snapshot
-        return set(snapshot["effective_skills"]) if snapshot is not None else set()
-
-    def _get_runtime_skills(self, runtime_context) -> dict[str, RuntimeSkill]:
-        """读取准备阶段构造的运行信息。"""
-        snapshot = runtime_context.skill_runtime_snapshot
-        return snapshot["runtime_skills"] if snapshot is not None else {}
-
-    def _get_preloaded_skills(self, runtime_context) -> list[str]:
-        """仅保留完整快照内仍有效的预加载 Skill。"""
-        snapshot = runtime_context.skill_runtime_snapshot
-        if snapshot is None:
-            return []
-        effective = set(snapshot["effective_skills"])
-        return [slug for slug in snapshot["preloaded_skills"] if slug in effective]
-
     def _build_preloaded_skills_section(self, slugs: list[str], runtime_context) -> str:
         """从完整快照构建预加载提示；未准备阶段没有正文。"""
         snapshot = runtime_context.skill_runtime_snapshot
@@ -258,7 +227,7 @@ class SkillsMiddleware(AgentMiddleware):
     def _format_skills_list(self, skills_meta: list[RuntimeSkill]) -> str:
         """格式化 skills 列表"""
         if not skills_meta:
-            return f"(No skills available yet. You can create skills in {' or '.join(self.skills_sources_for_prompt)})"
+            return f"(No skills available yet. You can create skills in {' or '.join(_SKILL_SOURCES)})"
 
         lines = []
         for skill in skills_meta:
@@ -268,7 +237,7 @@ class SkillsMiddleware(AgentMiddleware):
 
     def _build_skills_section(self, skills_meta: list[RuntimeSkill]) -> str:
         """构建 skills 提示段"""
-        skills_locations = self._format_skills_locations(self.skills_sources_for_prompt)
+        skills_locations = self._format_skills_locations(_SKILL_SOURCES)
         skills_list = self._format_skills_list(skills_meta)
         return SKILLS_SYSTEM_PROMPT.format(
             skills_locations=skills_locations,

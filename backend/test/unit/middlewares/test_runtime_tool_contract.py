@@ -73,17 +73,19 @@ def test_runtime_fields_are_declared_and_excluded_from_user_configuration():
 async def test_dynamic_mcp_loading_requires_prior_tool_source_assembly():
     """Skill 动态建连不能在缺失来源记录时开始。"""
     from unittest.mock import AsyncMock
+    from langchain.agents.middleware.types import ModelRequest
     from yuxi.modules.agents.runtime.middlewares.skills import SkillsMiddleware
 
     context = BaseContext()
     context.skill_runtime_snapshot = {
         "effective_skills": ["report"],
         "preloaded_skills": ["report"],
+        "preloaded_skill_contents": {"report": "# Report instructions"},
         "runtime_skills": {"report": {"tools": [], "mcps": ["server"]}},
     }
-    request = SimpleNamespace(runtime=SimpleNamespace(context=context), state={})
+    request = ModelRequest(model=SimpleNamespace(), messages=[], tools=[], runtime=SimpleNamespace(context=context), state={})
     with pytest.raises(RuntimeError, match="来源尚未装配"):
-        await SkillsMiddleware(enable_skills_prompt=False).awrap_model_call(request, AsyncMock())
+        await SkillsMiddleware().awrap_model_call(request, AsyncMock())
 
 
 def test_missing_mcp_connection_blocks_skill_dependencies_but_preserves_explicit_tools(context, mcp_policy):

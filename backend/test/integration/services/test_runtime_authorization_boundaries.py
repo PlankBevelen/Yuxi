@@ -1,5 +1,7 @@
 """真实数据库、Skill 字节与执行图的授权刷新边界。"""
 
+import asyncio
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 
 from test.integration.support.module_audit import isolated_audit_store
 from yuxi.modules.agents.models.definitions import Agent
@@ -143,6 +145,10 @@ async def test_shipping_model_round_syncs_projection_once_and_checks_identity_af
 
 async def test_summary_threshold_counts_authorized_preloaded_root(authorized_context):
     """摘要阈值消费包含预加载正文的最终输入。"""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg import AsyncConnection
+    from psycopg.rows import dict_row
+
     fixture = authorized_context
     (fixture.source / "SKILL.md").write_text("# CURRENT_AUTHORIZED_SKILL\n" + "body " * 16000)
     fixture.context.summary_threshold = 8
@@ -150,13 +156,34 @@ async def test_summary_threshold_counts_authorized_preloaded_root(authorized_con
     model = CapturingModel()
     workdir = fixture.source.parent / "workdir"
     backend = CompositeBackend(default=FilesystemBackend(root_dir=workdir, virtual_mode=True), routes={})
-    graph = create_agent(
-        model=model, tools=fixture.tools, middleware=await chatbot_graph._build_middlewares(fixture.context, backend, cleanup_model=model)
-    )
-    result = await graph.ainvoke(
-        {"messages": [HumanMessage(content="old question"), AIMessage(content="old answer"), HumanMessage(content="new question")]},
-        context=fixture.context,
-    )
+    async with fixture.sessions() as db:
+        schema = await db.scalar(text("SELECT current_schema()"))
+    async with await AsyncConnection.connect(
+        os.environ["POSTGRES_URL"].replace("+asyncpg", ""),
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+        options=f"-csearch_path={schema}",
+    ) as connection:
+        checkpointer = AsyncPostgresSaver(connection)
+        await checkpointer.setup()
+        graph = create_agent(
+            model=model,
+            tools=fixture.tools,
+            middleware=await chatbot_graph._build_middlewares(fixture.context, backend, cleanup_model=model),
+            checkpointer=checkpointer,
+        )
+        config = {"configurable": {"thread_id": "isolated-summary-checkpoint"}}
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="old question"), AIMessage(content="old answer"), HumanMessage(content="new question")]},
+            config=config,
+            context=fixture.context,
+        )
+        saved = await graph.aget_state(config)
+        assert [message.content for message in saved.values["messages"][:3]] == ["old question", "old answer", "new question"]
+        event = saved.values["_summarization_event"]
+        assert event["cutoff_index"] == 2
+        assert "old question" in (workdir / event["file_path"].lstrip("/")).read_text()
     assert len(model.requests) == 2
     assert "old question" in str(model.requests[0][0].content)
     assert "CURRENT_AUTHORIZED_SKILL" in str(model.requests[1][0].content)
@@ -210,6 +237,53 @@ async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_ro
     assert (projection.get_user_skills_root_dir("caller") / "bound-skill/SKILL.md").read_text() == "# UPDATED_BOUND_ROOT\n"
 
 
+async def test_skill_runtime_skips_locked_invisible_row(authorized_context):
+    """其他用户持有私有行写锁时，候选筛选不得阻塞运行时。"""
+    from yuxi.modules.extensions.skills.access import lock_accessible_shared_skills_for_runtime
+
+    fixture = authorized_context
+    async with fixture.sessions() as db:
+        db.add(
+            Skill(
+                slug="hidden-skill",
+                name="Hidden",
+                description="fixture",
+                source_type="upload",
+                created_by="owner",
+                dir_path="shared/hidden-skill",
+                share_config={"version": 2, "read_scope": None, "manage_scope": None},
+            )
+        )
+        await db.commit()
+    async with fixture.sessions() as editor, fixture.sessions() as runtime:
+        await editor.execute(select(Skill).where(Skill.slug == "hidden-skill").with_for_update())
+        reader = await runtime.scalar(select(User).where(User.uid == "caller"))
+        rows = await asyncio.wait_for(lock_accessible_shared_skills_for_runtime(runtime, reader, ["hidden-skill"]), timeout=2)
+        assert rows == []
+
+
+async def test_skill_runtime_rechecks_revocation_after_waiting_for_lock(authorized_context):
+    """初始可见的候选在等待行锁期间被撤权，锁后必须拒绝。"""
+    from yuxi.modules.extensions.skills.access import lock_accessible_shared_skills_for_runtime
+
+    fixture = authorized_context
+    async with fixture.sessions() as editor, fixture.sessions() as runtime:
+        skill = await editor.scalar(select(Skill).where(Skill.slug == "live-skill").with_for_update())
+        skill.share_config = {"version": 2, "read_scope": None, "manage_scope": None}
+        await editor.flush()
+        reader = await runtime.scalar(select(User).where(User.uid == "caller"))
+        pending = asyncio.create_task(lock_accessible_shared_skills_for_runtime(runtime, reader, ["live-skill"]))
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(pending), timeout=0.2)
+            await editor.commit()
+            assert await asyncio.wait_for(pending, timeout=3) == []
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+
 async def test_skill_prompt_is_built_after_current_request_authorization(authorized_context):
     """已准备 Skill 被撤销时，实际模型请求不能携带旧的预加载正文。"""
     fixture = authorized_context
@@ -228,6 +302,47 @@ async def test_skill_prompt_is_built_after_current_request_authorization(authori
     assert "CURRENT_AUTHORIZED_SKILL" not in "\n".join(str(message.content) for message in model.requests[0])
     assert fixture.context.skills == []
     assert not (projection.get_user_skills_root_dir("caller") / "live-skill").exists()
+
+
+@pytest.mark.parametrize("change", ["revoked", "personal_replacement"])
+async def test_model_retry_rejects_changed_injected_skill_with_real_sources(authorized_context, change):
+    """实际数据库撤权或个人同名替换后，网络重试不能发送旧提示。"""
+    from yuxi.modules.agents.runtime.middlewares.network_retry import NetworkRetryMiddleware
+    from yuxi.modules.workspace.paths import user_workspace_dir
+
+    fixture = authorized_context
+
+    class ChangingModel(CapturingModel):
+        """首次请求后改变真实来源或权限，再返回网络错误。"""
+
+        async def _agenerate(self, messages, **kwargs):
+            """让后续重试必须经过当前授权与来源复核。"""
+            self.requests.append(messages)
+            if len(self.requests) == 1:
+                if change == "revoked":
+                    async with fixture.sessions() as db:
+                        skill = await db.scalar(select(Skill).where(Skill.slug == "live-skill"))
+                        skill.share_config = {"version": 2, "read_scope": None, "manage_scope": None}
+                        await db.commit()
+                else:
+                    personal = user_workspace_dir("caller") / "agents" / "skills" / "live-skill"
+                    personal.mkdir(parents=True)
+                    (personal / "SKILL.md").write_text("---\nname: live-skill\ndescription: replacement\n---\nPERSONAL_REPLACEMENT")
+                raise ConnectionError("retry after source change")
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="UNEXPECTED_OLD_PROMPT"))])
+
+    model = ChangingModel()
+    middlewares = await chatbot_graph._build_middlewares(
+        fixture.context, CompositeBackend(default=StateBackend, routes={}), cleanup_model=model
+    )
+    for middleware in middlewares:
+        if isinstance(middleware, NetworkRetryMiddleware):
+            middleware._network_initial_delay = 0.001
+    graph = create_agent(model=model, tools=fixture.tools, middleware=middlewares)
+    with pytest.raises(AgentExecutionRevoked, match="Skill 权限或来源"):
+        await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, context=fixture.context)
+    assert len(model.requests) == 1
+    assert "CURRENT_AUTHORIZED_SKILL" in "\n".join(str(message.content) for message in model.requests[0])
 
 
 @pytest.mark.parametrize("revoke", [False, True])

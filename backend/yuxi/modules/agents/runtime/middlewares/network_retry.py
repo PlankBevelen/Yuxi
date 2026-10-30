@@ -25,6 +25,7 @@ from langchain_core.exceptions import ModelAPIError, ModelConnectionError, Model
 from langgraph.errors import GraphBubbleUp
 
 from yuxi.infrastructure.observability.logging import logger
+from yuxi.shared.errors import PermissionDeniedError
 
 # 网络恢复类异常：特点是"网络/服务端恢复后重试大概率成功"。
 # 未知 SDK 异常的文本兜底；已知类型和 HTTP 状态码优先。
@@ -143,7 +144,7 @@ class NetworkRetryMiddleware(ModelRetryMiddleware):
 
 def _retry_non_network_errors(exc: BaseException) -> bool:
     """父类 retry_on 谓词：网络异常已由 handler 包装处理，这里排除；其余按默认语义。"""
-    if isinstance(exc, PermissionError) or _is_network_error(exc):
+    if isinstance(exc, (PermissionError, PermissionDeniedError)) or _is_network_error(exc):
         return False
     if isinstance(exc, ModelError):
         return exc.is_retryable
@@ -152,6 +153,8 @@ def _retry_non_network_errors(exc: BaseException) -> bool:
 
 def _is_network_error(exc: BaseException) -> bool:
     """优先按异常链的类型和 HTTP 状态分类，未知异常才匹配文本。"""
+    if isinstance(exc, (PermissionError, PermissionDeniedError)):
+        return False
     seen: set[int] = set()
     details: list[str] = []
     cursor: BaseException | None = exc

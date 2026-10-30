@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from yuxi.infrastructure.filesystem import await_io
 from yuxi.modules.agents.runtime.sandbox import UserSandboxBackend
 from yuxi.modules.agents.runtime.sandbox.download import download_sandbox_directory
 from yuxi.modules.extensions.options import remote_skill_source_policy
@@ -50,7 +51,7 @@ class RemoteSkillDownloads:
     async def cleanup(self) -> None:
         """释放本批获取持有的宿主临时目录。"""
         if self.temp_home:
-            await asyncio.to_thread(shutil.rmtree, self.temp_home, ignore_errors=True)
+            await await_io(asyncio.to_thread(shutil.rmtree, self.temp_home, ignore_errors=True))
 
 
 async def list_remote_skills(source: str, *, uid: str) -> list[dict[str, str]]:
@@ -141,7 +142,7 @@ async def download_remote_skills(
             await sandbox.cleanup()
     except BaseException:
         if temp_home:
-            await asyncio.to_thread(shutil.rmtree, temp_home, ignore_errors=True)
+            await await_io(asyncio.to_thread(shutil.rmtree, temp_home, ignore_errors=True))
         raise
 
     return RemoteSkillDownloads(temp_home=temp_home, results=[results[index] for index in range(len(skills))])
@@ -207,17 +208,19 @@ class _RemoteSkillRequest:
     async def download_skill(self, name: str, target_dir: Path) -> None:
         """将 Sandbox 内的一个 Skill 下载到宿主临时目录。"""
         remote_dir = f"{self.home}/.agents/skills/{name}"
-        await asyncio.to_thread(
-            download_sandbox_directory,
-            self.backend,
-            remote_dir,
-            target_dir,
-            empty_message="skills CLI 未生成预期的技能目录",
+        await await_io(
+            asyncio.to_thread(
+                download_sandbox_directory,
+                self.backend,
+                remote_dir,
+                target_dir,
+                empty_message="skills CLI 未生成预期的技能目录",
+            )
         )
 
     async def cleanup(self) -> None:
         """只移除本请求的临时文件，不暂停或销毁用户环境。"""
-        await asyncio.to_thread(self.backend.delete_authorized_path, self.home, root=WORKSPACE_PATH)
+        await await_io(asyncio.to_thread(self.backend.delete_authorized_path, self.home, root=WORKSPACE_PATH))
 
 
 def _normalize_source(source: str, allowed_hosts: list[str]) -> str:

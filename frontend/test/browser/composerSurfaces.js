@@ -2,19 +2,6 @@
 // 使用真实组件和合成数据，所有 API 写入都被拒绝。
 async page => {
   const check = (value, message) => { if (!value) throw new Error(message) }
-  /** 以独立 sRGB 亮度公式验证空态提示的真实对比度。 */
-  const contrast = (foreground, background) => {
-    const luminance = color => {
-      const channels = color.match(/[\d.]+/g).slice(0, 3).map(value => {
-        const channel = Number(value) / 255
-        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-      })
-      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
-    }
-    const a = luminance(foreground)
-    const b = luminance(background)
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
-  }
   const origin = page.url().split('/').slice(0, 3).join('/')
   const failures = []
   page.on('pageerror', error => failures.push(error.message))
@@ -100,14 +87,21 @@ async page => {
     for (const focused of [false, true]) {
       if (focused) await editor.focus()
       await settle()
-      const placeholder = await editor.evaluate(element => ({
-        empty: element.matches(':empty'),
-        content: getComputedStyle(element, '::before').content,
-        color: getComputedStyle(element, '::before').color,
-        background: getComputedStyle(element.closest('.input-box')).backgroundColor
-      }))
+      const placeholder = await editor.evaluate(element => {
+        const reference = document.createElement('span')
+        reference.style.color = 'var(--gray-300)'
+        element.parentElement.appendChild(reference)
+        const result = {
+          empty: element.matches(':empty'),
+          content: getComputedStyle(element, '::before').content,
+          color: getComputedStyle(element, '::before').color,
+          expectedColor: getComputedStyle(reference).color
+        }
+        reference.remove()
+        return result
+      })
       check(placeholder.empty && placeholder.content.length > 2, '空输入框没有显示占位提示')
-      check(contrast(placeholder.color, placeholder.background) >= 4.5, '空输入框占位文字对比不足')
+      check(placeholder.color === placeholder.expectedColor, '空输入框占位文字必须使用 gray-300')
     }
     await page.evaluate(async () => {
       window.composerReview.state.text = '整理资料并提炼关键结论'

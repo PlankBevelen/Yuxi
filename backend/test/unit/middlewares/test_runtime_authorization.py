@@ -4,13 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from yuxi.modules.agents.runtime.context import BaseContext
 from yuxi.modules.agents.runtime.middlewares.authorization import tool_allowed
 
 
 @pytest.fixture
 def context():
     """构图时注册工具、执行时权限独立变化的 Context。"""
-    return SimpleNamespace(
+    return BaseContext(
         tools=[],
         mcps=[],
         registered_builtin_tool_names={"skill_tool"},
@@ -158,7 +159,7 @@ async def test_context_overflow_does_not_send_summary_after_revocation(monkeypat
         """独立记录摘要请求。"""
 
         _llm_type = "review-summary"
-        profile = {"max_input_tokens": 128000}
+        profile = {"max_input_tokens": 128000, "max_output_tokens": 32768}
 
         def _get_ls_params(self):
             """提供测试模型的 tracing 类型。"""
@@ -195,9 +196,8 @@ async def test_context_overflow_does_not_send_summary_after_revocation(monkeypat
     summary = summary_module.YuxiSummarizationMiddleware(
         model=SummaryModel(),
         backend=CompositeBackend(default=MemoryBackend(), routes={}, artifacts_root="/outputs"),
-        trigger=("messages", 100),
+        trigger=("tokens", 100_000),
         keep=("messages", 1),
-        trim_tokens_to_summarize=None,
     )
     # 与 shipping factory 注入同一真实调用者 Context。
     summary.authorization_context = context
@@ -340,9 +340,7 @@ async def test_warning_checkpoint_is_replaced_after_capability_recovers(monkeypa
         yield None
 
     monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", session)
-    monkeypatch.setattr(
-        authorization, "_require_execution_actor", AsyncMock(return_value=(SimpleNamespace(id=1), None, None))
-    )
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock(return_value=(SimpleNamespace(id=1), None, None)))
     monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={}))
     monkeypatch.setattr(authorization, "sync_agent_context_skills", AsyncMock())
     context.mcp_unavailable = {"remote": "未连接，请重新连接", "github": "连接失败"}
@@ -359,6 +357,84 @@ async def test_warning_checkpoint_is_replaced_after_capability_recovers(monkeypa
     context.mcp_unavailable.clear()
     await graph.ainvoke({"messages": [HumanMessage(content="继续")]}, config, context=context)
     assert (await graph.aget_state(config)).values["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_failed_session_cleanup_does_not_publish_skill_snapshot(monkeypatch):
+    """事务退出失败时，临时解析结果不能污染下一次授权刷新。"""
+    from unittest.mock import AsyncMock
+
+    from yuxi.modules.agents.runtime.context import BaseContext
+    from yuxi.modules.agents.runtime.middlewares import authorization
+
+    context = BaseContext()
+    original = {"skill_metadata": {"a": {"source_scope": "agent_bound"}}}
+    context.skill_runtime_snapshot = original
+
+    class FailedSession:
+        """模拟查询成功而事务退出失败。"""
+
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_):
+            raise ConnectionError("connection lost during cleanup")
+
+    async def refresh(candidate, **_kwargs):
+        candidate.skill_runtime_snapshot = {"skill_metadata": {}}
+
+    monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", FailedSession)
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock(return_value=(None, None, None)))
+    monkeypatch.setattr(authorization, "refresh_agent_context_resources", refresh)
+    monkeypatch.setattr(authorization, "_resolve_mcp_policy", AsyncMock(return_value={}))
+    with pytest.raises(ConnectionError):
+        await authorization._refresh_execution_resources(context)
+    assert context.skill_runtime_snapshot is original
+
+
+@pytest.mark.asyncio
+async def test_successful_resource_refresh_publishes_context_fields_after_transaction(monkeypatch, context):
+    """刷新使用浅拷贝，事务退出前不发布，成功后替换契约字段。"""
+    from unittest.mock import AsyncMock
+
+    from yuxi.modules.agents.runtime.middlewares import authorization
+
+    original = context.skill_runtime_snapshot
+    updated = {"skill_metadata": {}}
+    context.mcp_tools = {"remote": [object()]}
+
+    class SessionContext:
+        """在事务退出点核对尚未发布的真实 Context。"""
+
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_):
+            assert context.skill_runtime_snapshot is original
+            assert context.agent_slug is None
+            return False
+
+    async def refresh(candidate, **_kwargs):
+        """只替换待发布资源，保留运行内对象引用。"""
+        assert isinstance(candidate, BaseContext) and candidate is not context
+        assert candidate.mcp_tools is context.mcp_tools
+        candidate.skill_runtime_snapshot = updated
+        candidate.tools = ["new_tool"]
+        candidate._resource_selections = {"tools": ["new_tool"]}
+        candidate._capability_limited = True
+        candidate.agent_slug = "current-agent"
+
+    monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", SessionContext)
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock(return_value=(None, None, None)))
+    monkeypatch.setattr(authorization, "refresh_agent_context_resources", refresh)
+    monkeypatch.setattr(authorization, "_resolve_mcp_policy", AsyncMock(return_value={"remote": set()}))
+    policy = await authorization._refresh_execution_resources(context)
+    assert policy == {"remote": set()}
+    assert context.skill_runtime_snapshot is updated
+    assert context.tools == ["new_tool"]
+    assert context._resource_selections == {"tools": ["new_tool"]}
+    assert context._capability_limited is True
+    assert context.agent_slug == "current-agent"
 
 
 @pytest.mark.asyncio
@@ -385,9 +461,7 @@ async def test_tool_boundary_refreshes_resources_without_syncing_projection(monk
     monkeypatch.setattr(authorization, "_require_execution_actor", actor)
     monkeypatch.setattr(authorization, "refresh_agent_context_resources", resources)
     monkeypatch.setattr(authorization, "sync_agent_context_skills", sync)
-    monkeypatch.setattr(
-        authorization, "available_mcp_servers", AsyncMock(return_value={"remote": SimpleNamespace(disabled_tools=[])})
-    )
+    monkeypatch.setattr(authorization, "available_mcp_servers", AsyncMock(return_value={"remote": SimpleNamespace(disabled_tools=[])}))
     request = SimpleNamespace(
         runtime=SimpleNamespace(context=context),
         state={"activated_skills": ["skill"]},
@@ -400,3 +474,132 @@ async def test_tool_boundary_refreshes_resources_without_syncing_projection(monk
     assert result == "工具继续执行"
     assert actor.await_count == 1
     assert resources.await_count == 1 and sync.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_mcp_failure_does_not_disable_later_call(monkeypatch, context):
+    from unittest.mock import AsyncMock
+    from langchain_core.messages import ToolMessage
+    from yuxi.modules.agents.runtime.middlewares import authorization
+
+    context.mcps, context.mcp_unavailable, context.run_id = ["remote"], {}, "run"
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={"remote": set()}))
+    request = SimpleNamespace(runtime=SimpleNamespace(context=context), state={}, tool_call={"name": "remote_tool", "id": "call"})
+    middleware = authorization.RuntimeAuthorizationMiddleware()
+    first = await middleware.awrap_tool_call(request, AsyncMock(side_effect=ConnectionError("private")))
+    second = await middleware.awrap_tool_call(request, AsyncMock(return_value=ToolMessage(content="ok", tool_call_id="call")))
+    assert first.status == "error" and "private" not in first.content
+    assert second.content == "ok"
+    assert context.mcp_unavailable == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["revoked", "source_replaced", "temporary_grant"])
+async def test_skill_request_identity_survives_authorization_retry(monkeypatch, change):
+    """已注入身份固定，撤权或换来源拒绝，未注入的临时授权不触发误判。"""
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain_core.messages import AIMessage
+    from yuxi.modules.agents.runtime.middlewares import authorization
+    from yuxi.modules.agents.runtime.middlewares.network_retry import NetworkRetryMiddleware
+    from yuxi.modules.agents.runtime.middlewares.skills import SkillsMiddleware
+
+    def snapshot(slugs, scope="shared"):
+        return {
+            "effective_skills": slugs,
+            "preloaded_skills": ["a"],
+            "preloaded_skill_contents": {"a": "A-INJECTED"},
+            "skill_metadata": {slug: {"source_scope": scope, "version": "1", "content_hash": slug} for slug in slugs},
+            "runtime_skills": {
+                slug: {"name": slug, "description": slug, "path": f"/{slug}/SKILL.md", "tools": [], "mcps": [], "skills": []}
+                for slug in slugs
+            },
+        }
+
+    context = BaseContext(
+        skill_runtime_snapshot=snapshot(["a"]),
+        tools=[],
+        mcps=[],
+        mcp_tool_servers={},
+        registered_builtin_tool_names=set(),
+        mcp_tools={},
+        mcp_unavailable={},
+        uid="fixture",
+        middleware_tool_names=set(),
+    )
+    attempt = 0
+    received = []
+
+    async def refresh(_context, **_kwargs):
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            context.skill_runtime_snapshot = snapshot(["a"])
+        elif change == "revoked":
+            context.skill_runtime_snapshot = snapshot([])
+        elif change == "source_replaced":
+            context.skill_runtime_snapshot = snapshot(["a"], scope="personal")
+        elif attempt == 2:
+            context.skill_runtime_snapshot = snapshot(["a", "b"])
+            raise ConnectionError("transaction cleanup interrupted")
+        else:
+            context.skill_runtime_snapshot = snapshot(["a"])
+        return {}
+
+    async def no_projection(_context):
+        pass
+
+    async def model(request):
+        received.append(request.system_message.text)
+        if len(received) == 1:
+            raise ConnectionError("network interrupted")
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", refresh)
+    monkeypatch.setattr(authorization, "sync_agent_context_skills", no_projection)
+    auth = authorization.RuntimeAuthorizationMiddleware()
+    retry = NetworkRetryMiddleware(max_retries=0, network_initial_delay=0.001, network_budget_seconds=1)
+    skills = SkillsMiddleware()
+    request = ModelRequest(model=SimpleNamespace(), messages=[], tools=[], state={}, runtime=SimpleNamespace(context=context))
+
+    async def authorized(req):
+        return await auth.awrap_model_call(req, model)
+
+    async def retried(req):
+        return await retry.awrap_model_call(req, authorized)
+
+    if change == "temporary_grant":
+        result = await skills.awrap_model_call(request, retried)
+        assert result.result[0].content == "ok"
+        assert len(received) == 2 and all("A-INJECTED" in prompt and "B-INJECTED" not in prompt for prompt in received)
+    else:
+        with pytest.raises(authorization.AgentExecutionRevoked):
+            await skills.awrap_model_call(request, retried)
+        assert len(received) == 1 and "A-INJECTED" in received[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["python", "domain"])
+async def test_mcp_permission_error_is_not_converted_to_tool_failure(monkeypatch, context, error_kind):
+    """真实外层 Guard 不得把 MCP 权限拒绝转为可继续运行的工具结果。"""
+    from unittest.mock import AsyncMock
+    from yuxi.modules.agents.runtime.middlewares import authorization
+    from yuxi.modules.agents.runtime.middlewares.tool_error_guard import ToolErrorGuardMiddleware
+    from yuxi.shared.errors import PermissionDeniedError
+
+    context.mcps, context.mcp_unavailable, context.run_id = ["remote"], {}, "run"
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={"remote": set()}))
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(context=context, config={}), state={}, tool_call={"name": "remote_tool", "id": "call"}
+    )
+    error_type = PermissionError if error_kind == "python" else PermissionDeniedError
+    failure = error_type("revoked")
+    failure.__cause__ = ConnectionError("disconnected")
+
+    async def authorized(current):
+        """按生产顺序执行 MCP 授权与工具异常保护。"""
+        return await authorization.RuntimeAuthorizationMiddleware().awrap_tool_call(current, AsyncMock(side_effect=failure))
+
+    with pytest.raises(authorization.AgentExecutionRevoked) as caught:
+        await ToolErrorGuardMiddleware().awrap_tool_call(request, authorized)
+    assert caught.value.__cause__ is failure
+    assert context.mcp_unavailable == {}

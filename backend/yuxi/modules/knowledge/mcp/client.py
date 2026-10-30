@@ -25,6 +25,10 @@ class KnowledgeMCPUnavailable(RuntimeError):
     """连接、认证或服务故障使本次运行的知识能力不可用。"""
 
 
+class KnowledgeMCPRuntimeError(ValueError):
+    """运行上下文缺少可信身份或知识库范围。"""
+
+
 async def call_knowledge_mcp(
     name: str,
     arguments: dict[str, Any],
@@ -106,8 +110,10 @@ def knowledge_mcp_connection(server_slug: str, *, uid: str, context=None, manage
         selection = "all"
     else:
         if context is None or getattr(context, "uid", None) != uid:
-            raise ValueError("知识库 MCP 缺少匹配的可信运行上下文")
-        selection = context.knowledges
+            raise KnowledgeMCPRuntimeError("知识库 MCP 缺少匹配的可信运行上下文")
+        selection = getattr(context, "knowledges", None)
+        if selection is None:
+            raise KnowledgeMCPRuntimeError("知识库 MCP 缺少可信的运行选择范围")
     return {"auth": KnowledgeMCPAuth(uid, selection, before_request), "httpx_client_factory": knowledge_http_client}
 
 

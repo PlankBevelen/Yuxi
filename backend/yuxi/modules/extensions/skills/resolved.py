@@ -24,6 +24,7 @@ class SkillRuntimeMetadata(TypedDict):
     source_scope: str
     version: str | None
     content_hash: str | None
+    source_identity: str
 
 
 class SkillRuntimeSnapshot(TypedDict):

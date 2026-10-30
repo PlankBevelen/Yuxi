@@ -326,3 +326,28 @@ async def test_invalid_model_request_with_timeout_text_is_not_retried():
         await mw.awrap_model_call(object(), handler)
     assert raised.value is error
     assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["python", "domain"])
+async def test_permission_error_with_network_cause_is_never_retried(error_kind):
+    """权限拒绝即使带有网络原因也只能发送一次请求。"""
+    from yuxi.shared.errors import PermissionDeniedError
+
+    middleware = NetworkRetryMiddleware(max_retries=2, network_budget_seconds=30, network_initial_delay=0)
+    error_type = PermissionError if error_kind == "python" else PermissionDeniedError
+    error = error_type("permission revoked")
+    error.__cause__ = ConnectionError("connection lost")
+    attempts = 0
+
+    async def handler(_request):
+        """记录实际请求次数并返回权限拒绝。"""
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    assert _is_network_error(error) is False
+    with pytest.raises(error_type) as caught:
+        await middleware.awrap_model_call(object(), handler)
+    assert caught.value is error
+    assert attempts == 1

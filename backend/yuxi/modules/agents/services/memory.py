@@ -6,6 +6,7 @@ import asyncio
 
 from sqlalchemy import text
 
+from yuxi.infrastructure.filesystem import await_io
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.agents.repositories.runs import AgentRunRepository
 from yuxi.modules.agents.services.memory_history import MemoryHistoryService
@@ -37,10 +38,8 @@ async def load_memory_prompt(uid: str) -> str | None:
         )
     except FileNotFoundError:
         # 用户可在 Workspace 中删除 MEMORY.md，视为无记忆而非错误
-        return None
+        return ""
     prompt = content.decode("utf-8", errors="replace").strip()
-    if not prompt:
-        return None
     if truncated:
         prompt = f"{prompt}\n\n[MEMORY.md 内容已截断；可在 Workspace 中整理源文件]"
     return prompt
@@ -89,7 +88,7 @@ async def remember_memory(
         if status == "unchanged":
             size = len(current.encode("utf-8"))
         else:
-            metadata = await asyncio.to_thread(_replace_memory_file, normalized_uid, updated)
+            metadata = await await_io(asyncio.to_thread(_replace_memory_file, normalized_uid, updated))
             size = metadata["size"]
 
         return {

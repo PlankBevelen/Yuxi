@@ -12,11 +12,74 @@ from yuxi.modules.extensions.skills.repository import SkillRepository as RealSki
 from yuxi.modules.workspace.paths import user_workspace_dir
 
 
+@pytest.mark.asyncio
+async def test_personal_skill_same_slug_replacement_changes_runtime_identity(tmp_path, monkeypatch):
+    """真实个人来源被同名替换或修改后，不得沿用旧请求的身份。"""
+    from yuxi.modules.workspace import paths
+
+    monkeypatch.setattr(paths, "get_user_data_dir", lambda: tmp_path)
+    directory = user_workspace_dir("user-a") / "agents" / "skills" / "personal"
+    directory.mkdir(parents=True)
+    skill_file = directory / "SKILL.md"
+    skill_file.write_text("---\nname: personal\ndescription: first\n---\nFirst", encoding="utf-8")
+    context = SimpleNamespace(skills=[], preload_skills=[])
+    user = SimpleNamespace(uid="user-a")
+
+    async def no_shared(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(skill_runtime, "lock_accessible_shared_skills_for_runtime", no_shared)
+    first = await resolve_runtime_skills_for_context(context, db=None, user=user)
+    replacement = directory / "replacement"
+    replacement.write_text("---\nname: personal\ndescription: second\n---\nSecond", encoding="utf-8")
+    replacement.replace(skill_file)
+    second = await resolve_runtime_skills_for_context(context, db=None, user=user)
+    assert first["skill_metadata"]["personal"] != second["skill_metadata"]["personal"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_skill_closure_rechecks_each_row_without_listing_all(monkeypatch):
+    """逐行加锁后复核权限，并阻止依赖引入其他 Agent 的专属 Skill。"""
+    from yuxi.modules.extensions.skills import access
+
+    items = {
+        "root": SimpleNamespace(slug="root", bound_agent_id=None, enabled=True, skill_dependencies=["other-bound", "denied", "dep"]),
+        "other-bound": SimpleNamespace(slug="other-bound", bound_agent_id=99, enabled=True, skill_dependencies=[]),
+        "denied": SimpleNamespace(slug="denied", bound_agent_id=None, enabled=False, skill_dependencies=[]),
+        "dep": SimpleNamespace(slug="dep", bound_agent_id=None, enabled=True, skill_dependencies=[]),
+    }
+
+    class Repository:
+        """按真实选中路径提供已锁定行。"""
+
+        def __init__(self, _db):
+            pass
+
+        async def get_by_slug(self, slug):
+            return items.get(slug)
+
+        async def get_by_slug_for_read(self, slug):
+            return items.get(slug)
+
+        async def list_enabled_readable(self, _user):
+            raise AssertionError("不得全量扫描共享 Skill")
+
+    monkeypatch.setattr(access, "SkillRepository", Repository)
+    monkeypatch.setattr(access, "user_can_access_skill", lambda _user, item: item.enabled)
+    visible = await access.lock_accessible_shared_skills_for_runtime(None, object(), ["root"])
+    assert [item.slug for item in visible] == ["root", "dep"]
+    bound = await access.lock_accessible_shared_skills_for_runtime(None, object(), ["other-bound"], bound_slug="other-bound")
+    assert [item.slug for item in bound] == ["other-bound"]
+
+
 def _mock_runtime_sources(monkeypatch, accessible):
     """让运行时组合测试使用给定共享和个人候选。"""
 
     async def locked(db, user, _selected, *, shadowed_slugs=None):
         items = await accessible(db, user)
+        for item in items:
+            if not hasattr(item, "id"):
+                item.id = item.slug
         shadowed_slugs = shadowed_slugs or set()
         return [item for item in items if item.source_scope != "personal" and item.slug not in shadowed_slugs]
 
@@ -92,6 +155,10 @@ async def test_personal_skills_are_available_independently_of_shared_selection(t
             """模拟单行持锁读取。"""
             return next((item for item in (shared, extra) if item.slug == slug), None)
 
+        async def get_by_slug(self, slug):
+            """模拟单行无锁可见性筛选。"""
+            return next((item for item in (shared, extra) if item.slug == slug), None)
+
     monkeypatch.setattr(service, "SkillRepository", FakeSkillRepository)
     monkeypatch.setattr("yuxi.modules.extensions.skills.access.SkillRepository", FakeSkillRepository)
     monkeypatch.setattr("yuxi.modules.extensions.skills.repository.SkillRepository", FakeSkillRepository)
@@ -162,8 +229,11 @@ async def test_personal_skill_is_not_a_direct_preload_candidate(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_resolve_runtime_skills_derives_authorized_scope(monkeypatch):
+async def test_resolve_runtime_skills_derives_authorized_scope(monkeypatch, tmp_path):
     """运行时 scope 只保留授权选择，并按依赖闭包区分共享与个人来源。"""
+    personal_dir = tmp_path / "beta"
+    personal_dir.mkdir()
+    (personal_dir / "SKILL.md").write_text("# beta", encoding="utf-8")
 
     async def fake_list_accessible_skills(db, user):
         assert db is not None
@@ -188,7 +258,7 @@ async def test_resolve_runtime_skills_derives_authorized_scope(monkeypatch):
                 source_scope="personal",
                 version=None,
                 content_hash=None,
-                source_dir="/tmp/personal/beta",
+                source_dir=personal_dir,
                 tool_dependencies=[],
                 mcp_dependencies=[],
                 skill_dependencies=[],
@@ -257,6 +327,11 @@ async def test_preload_reads_authorized_dependency_closure(tmp_path, monkeypatch
         "alpha": "# Alpha\nUSE_ALPHA",
         "beta": "# Beta\nUSE_BETA",
     }
+    context = SimpleNamespace(skills=["alpha"], preload_skills=["alpha"], skill_runtime_snapshot=scope)
+    (skills[0].source_dir / "SKILL.md").write_text("# Alpha\nUPDATED", encoding="utf-8")
+    refreshed = await resolve_runtime_skills_for_context(context, db=object(), user=SimpleNamespace(uid="test"))
+    assert refreshed["preloaded_skill_contents"]["alpha"] == "# Alpha\nUPDATED"
+    assert refreshed["skill_metadata"]["alpha"] != scope["skill_metadata"]["alpha"]
 
 
 @pytest.mark.asyncio

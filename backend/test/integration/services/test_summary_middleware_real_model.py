@@ -128,7 +128,6 @@ async def test_compacted_messages_call_real_chat_model(monkeypatch: pytest.Monke
         trigger=("tokens", 2000),
         keep=("messages", 2),
         token_counter=_content_char_counter,
-        trim_tokens_to_summarize=None,
     )
     middleware._history_path_prefix = VIRTUAL_PATH_CONVERSATION_HISTORY
     middleware._large_tool_results_prefix = VIRTUAL_PATH_LARGE_TOOL_RESULTS

@@ -10,7 +10,7 @@
 
 ## 自动压缩流程
 
-正式 graph 使用 `awrap_model_call`，主动维护使用 `aforce_summarize`；两者在实际摘要请求前执行异步授权刷新。同步 `wrap_model_call` 明确失败，避免在临时事件循环中复用 PostgreSQL 连接池。确定性消息精简和 token 计量保持普通函数。
+正式 graph 使用 `awrap_model_call`，主动维护使用 `aforce_summarize`；两者在实际摘要请求前执行异步授权刷新。同步 `wrap_model_call` 明确失败，避免在临时事件循环中复用 PostgreSQL 连接池。工具原文写入通过异步 backend 完成；token 计量使用近似值。
 
 ```mermaid
 flowchart TD
@@ -22,8 +22,8 @@ flowchart TD
     Compact --> Recount["按相同口径重新计量"]
     Recount -- "低于同一阈值" --> ModelCompact["用压缩视图调用主模型"]
     Recount -- "仍达到同一阈值" --> Summary["保存较早历史并生成摘要"]
-    Summary --> State["更新 checkpoint"]
-    State --> ModelSummary["system + tools + 摘要 + 最近原文 → 主模型"]
+    Summary --> ModelSummary["system + tools + 摘要 + 最近原文 → 主模型"]
+    ModelSummary -- "成功" --> State["提交摘要 checkpoint 更新"]
 ```
 
 入口阈值没有达到时，Yuxi 直接调用主模型。请求达到阈值后，确定性压缩先执行；压缩后的请求低于同一阈值时不调用摘要模型。主模型返回 `ContextOverflowError` 时，系统把它视为强制摘要信号。
@@ -32,10 +32,9 @@ flowchart TD
 
 确定性压缩为本次模型请求创建较小的消息视图：
 
-- `write_file` 和 `edit_file` 的过长参数截断为短提示，单次参数上限是 2,000 个字符；
+- `write_file` 和 `edit_file` 的过长正文参数截断为短提示，单个正文参数上限是 2,000 个字符；路径不裁剪，provider 原始参数保持有效 JSON；
 - 超过 `summary_tool_result_token_limit` 的工具结果完整写入 `outputs/large_tool_results/`，请求中只保留文件路径、内容哈希和近似 token 上限内的预览；
-- `query_kb` 和 `web_search` 解析 JSON，并在预算内按原顺序保留结果数量、文档或网页标识、来源、标题、URL、分数和受限正文预览；
-- 其他工具结果保留 head、middle 和 tail；
+- 所有工具结果使用相同的有界 head、middle 和 tail 文本预览；多模态结果的非文本块保留在请求中，完整原始内容写入文件；
 - 文件名使用工具名和内容哈希，同一内容可以稳定定位。
 
 token 数使用近似计算，只用于压力判断和预览长度，不是计费口径。完整结果无法写入 Workdir 时，系统拒绝用裁剪内容替换原 ToolMessage。
@@ -46,9 +45,9 @@ token 数使用近似计算，只用于压力判断和预览长度，不是计�
 
 成功后，`_summarization_event` 保存累计 cutoff、摘要消息和历史文件路径。后续请求根据这个事件跳过已摘要区间，只发送当前摘要和 cutoff 之后的原始消息。再次压缩时，局部 cutoff 会换算成完整 state 的位置。
 
-自动压缩先保存历史文件，再调用摘要模型。只有历史文件和非空摘要都成功生成后，系统才构造新的 `_summarization_event`；任一步失败都会中止当前模型调用，并保留 checkpoint 中已有的摘要事件。
+自动压缩先保存历史文件，再调用摘要模型。只有历史文件和非空摘要都成功生成后，系统才构造新的 `_summarization_event`；压缩后的主模型调用成功后才随结果提交 checkpoint 更新。任一步失败都会中止当前模型调用，并保留 checkpoint 中已有的摘要事件。
 
-checkpoint 只拥有模型继续运行所需的压缩视图；PostgreSQL Message 继续保存完整聊天记录。system prompt 和 tool schemas 由每次运行的当前 Agent 配置重新装配，不存入摘要 event。
+checkpoint 只拥有模型继续运行所需的压缩视图；PostgreSQL Message 继续保存完整聊天记录。历史 XML 用于阅读，不承诺无损还原工具调用 ID、artifact 或 provider 元数据。system prompt 和 tool schemas 由每次运行的当前 Agent 配置重新装配，不存入摘要 event。
 
 ## 主动压缩
 
@@ -79,7 +78,7 @@ checkpoint 只拥有模型继续运行所需的压缩视图；PostgreSQL Message
 | `summary_prompt` | 内置中文模板 | 摘要提示词，必须包含 `{messages}` |
 | `summary_tool_result_token_limit` | `300` | 工具结果的近似 token 阈值和预览上限 |
 
-降低 `summary_threshold` 会更早进入压缩流程；增加保留消息数会增加摘要后的请求体。默认阈值为 262144 token，不按模型上下文窗口自动缩小；使用窗口更小的模型时，管理员需降低该参数并预留系统提示、工具定义和输出空间。显式保存的阈值保留原值。修改参数后用典型工具输出和目标模型上下文窗口做实际验证。
+降低 `summary_threshold` 会更早进入压缩流程；增加保留消息数会增加摘要后的请求体。摘要请求另按模型已知上下文窗口预留输出，并以 UTF-8 字节保守估算模板与历史；模板本身超预算时调用前失败。模型窗口未知时使用独立的小输入与输出上限并记录警告，不能保证适配所有未知窗口。估算不是供应商的精确 token 计数，仍需用目标模型验证。
 
 ## 文件、权限和用量
 
@@ -90,6 +89,10 @@ checkpoint 只拥有模型继续运行所需的压缩视图；PostgreSQL Message
 Summary 触发使用近似 token 统计；主模型返回的 `usage_metadata` 用于实际用量记录，但 `siliconflow-cn` 和 `siliconflow` 当前被排除在 Provider 用量聚合之外。内部摘要模型调用不进入这组统计，因此不能把状态面板数据直接当作完整账单。
 
 ## 失败和恢复
+
+主模型服务端返回可识别的上下文超长错误时，系统进入压缩流程。摘要请求本身仍被服务端以同类错误拒绝时，下一次发送的历史输入预算缩至上一次的 80%，最多额外重试 5 次，即最多发送 6 次摘要请求。固定摘要指令、输出预留和完整历史归档保持不变，每次发送前重新复核当前调用者权限。
+
+历史已无法在缩减预算内形成有效输入，或第五次重试仍超长时，系统保留服务端上下文超长错误并失败。权限、网络、取消和其他模型错误不会触发这条缩减重试；相关错误由各自的执行边界处理。
 
 自动摘要无法保存历史文件、摘要模型报错或返回空内容时，当前模型调用失败并发送 `failed` 事件。系统不会把错误文本写入摘要视图，也不会创建或更新 `_summarization_event`。主动压缩保持相同的失败边界：历史文件和摘要都成功后才发布新的摘要 event。
 
@@ -116,4 +119,4 @@ Summary 触发使用近似 token 统计；主模型返回的 `usage_metadata` �
 - [主动压缩 service tests](https://github.com/xerrors/Yuxi/blob/main/backend/test/unit/services/test_context_compression_service.py)
 - [真实模型 integration test](https://github.com/xerrors/Yuxi/blob/main/backend/test/integration/services/test_summary_middleware_real_model.py)
 
-修改压缩逻辑时，至少验证低于阈值、确定性压缩后低于同一阈值、进入摘要、结构化检索预览、历史写入失败、摘要模型失败、主动压缩 busy 拒绝和 overflow 尾部裁剪；oracle 应读取消息视图、state update、Workdir 文件或协议结果。
+修改压缩逻辑时，至少验证低于阈值、确定性压缩后低于同一阈值、进入摘要、通用有界预览、历史写入失败、摘要模型失败、主动压缩 busy 拒绝和 overflow 尾部裁剪；oracle 应读取消息视图、state update、Workdir 文件或协议结果。

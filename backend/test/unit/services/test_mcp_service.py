@@ -587,7 +587,7 @@ async def test_runtime_isolates_failed_mcp_and_retains_healthy_tools(monkeypatch
     assert "server=broken" in "".join(logs) and "reason=" in "".join(logs)
     assert result == {"healthy": [tool]}
     assert run_tools == {"healthy": [tool]}
-    assert set(unavailable) == {"broken", "unconnected"}
+    assert set(unavailable) == ({"unconnected"} if failure_kind == "unreachable" else {"broken", "unconnected"})
     assert "secret" not in str(unavailable) and "TaskGroup" not in str(unavailable)
     assert "扩展页面" in unavailable["unconnected"]
     if failure_kind == "missing_key":
@@ -595,7 +595,7 @@ async def test_runtime_isolates_failed_mcp_and_retains_healthy_tools(monkeypatch
     elif failure_kind in {"wrong_key", "nested", "mixed"}:
         assert "重新连接" in unavailable["broken"]
     else:
-        assert "连接或调用失败" in unavailable["broken"]
+        assert "reason=服务连接或调用失败" in "".join(logs)
 
 
 async def test_runtime_does_not_swallow_identity_or_database_failure(monkeypatch):

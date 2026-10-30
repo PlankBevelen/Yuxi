@@ -32,8 +32,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        image_paths = _read_file_image_paths(request.messages)
-        request = _bridge_openai_tool_images(request)
+        request, image_paths = _prepare_tool_images(request)
         try:
             return handler(request)
         except Exception as exc:  # noqa: BLE001
@@ -46,8 +45,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        image_paths = _read_file_image_paths(request.messages)
-        request = _bridge_openai_tool_images(request)
+        request, image_paths = _prepare_tool_images(request)
         try:
             return await handler(request)
         except Exception as exc:  # noqa: BLE001
@@ -56,12 +54,12 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             raise
 
 
-def _bridge_openai_tool_images(request: ModelRequest) -> ModelRequest:
-    if not isinstance(request.model, ChatOpenAI):
-        return request
-
+def _prepare_tool_images(request: ModelRequest) -> tuple[ModelRequest, list[str]]:
+    """共用 OCR 位置索引，处理工具图片并收集尚未请求 OCR 的路径。"""
+    bridge_images = isinstance(request.model, ChatOpenAI)
     bridged_messages = []
     pending_images: list[dict[str, Any]] = []
+    image_paths: dict[str, None] = {}
     latest_ocr_call_by_path: dict[str, int] = {}
     for index, message in enumerate(request.messages):
         if not isinstance(message, AIMessage):
@@ -74,6 +72,7 @@ def _bridge_openai_tool_images(request: ModelRequest) -> ModelRequest:
                 latest_ocr_call_by_path[file_path] = index
 
     def flush_pending_images() -> None:
+        """在整组工具结果之后附加待桥接图片。"""
         if not pending_images:
             return
         bridged_messages.append(HumanMessage(content_blocks=[{"type": "text", "text": _TOOL_IMAGE_USER_TEXT}, *pending_images]))
@@ -92,6 +91,11 @@ def _bridge_openai_tool_images(request: ModelRequest) -> ModelRequest:
 
         image_path = message.additional_kwargs.get("read_file_path")
         ocr_fallback_requested = isinstance(image_path, str) and latest_ocr_call_by_path.get(image_path, -1) > index
+        if isinstance(image_path, str) and image_path and not ocr_fallback_requested:
+            image_paths.setdefault(image_path, None)
+        if not ocr_fallback_requested and not bridge_images:
+            bridged_messages.append(message)
+            continue
         if not ocr_fallback_requested:
             pending_images.extend(image_blocks)
         text = "\n".join(
@@ -115,21 +119,8 @@ def _bridge_openai_tool_images(request: ModelRequest) -> ModelRequest:
 
     flush_pending_images()
     if bridged_messages == request.messages:
-        return request
-    return request.override(messages=bridged_messages)
-
-
-def _read_file_image_paths(messages: list[Any]) -> list[str]:
-    paths: list[str] = []
-    for message in messages:
-        if not isinstance(message, ToolMessage):
-            continue
-        if not any(block.get("type") == "image" for block in message.content_blocks):
-            continue
-        path = message.additional_kwargs.get("read_file_path")
-        if isinstance(path, str) and path and path not in paths:
-            paths.append(path)
-    return paths
+        return request, list(image_paths)
+    return request.override(messages=bridged_messages), list(image_paths)
 
 
 def _ocr_tool_enabled(request: ModelRequest) -> bool:

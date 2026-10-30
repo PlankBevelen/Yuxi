@@ -84,4 +84,6 @@ async def test_runtime_requires_matching_context():
         client.knowledge_mcp_connection("knowledge", uid="u")
     with pytest.raises(ValueError, match="可信运行上下文"):
         client.knowledge_mcp_connection("knowledge", uid="u", context=SimpleNamespace(uid="other"))
+    with pytest.raises(client.KnowledgeMCPRuntimeError, match="选择范围"):
+        client.knowledge_mcp_connection("knowledge", uid="u", context=SimpleNamespace(uid="u"))
     assert client.knowledge_mcp_connection("knowledge", uid="u", management=True)["auth"].selection == "all"

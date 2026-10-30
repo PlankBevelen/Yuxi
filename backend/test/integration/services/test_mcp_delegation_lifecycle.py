@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -17,15 +18,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from test.integration.support.postgres_schema import create_isolated_manager, drop_isolated_schema
-from yuxi.api.dependencies.auth import get_db, get_superadmin_user
+from yuxi.api.dependencies.auth import get_db, get_required_user, get_superadmin_user
+from yuxi.api.errors import domain_error_handler
 from yuxi.api.routers.extensions.mcp import mcp as management_router
+from yuxi.api.routers.public_v1.knowledge import public_knowledge_router
 from yuxi.api.routers.public_v1.knowledge_mcp import create_knowledge_mcp
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.extensions.mcp import service
 from yuxi.modules.extensions.mcp.models import MCPConnection, MCPServer
 from yuxi.modules.identity.models import Department, User
 from yuxi.modules.knowledge.models import KnowledgeBase
-from yuxi.shared.errors import PermissionDeniedError, StateConflictError
+from yuxi.shared.errors import DomainError, PermissionDeniedError, StateConflictError
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
 
@@ -119,6 +122,9 @@ async def isolated_mcp(monkeypatch):
 
         app = FastAPI(routes=[knowledge.route], lifespan=lifespan)
         app.include_router(management_router, prefix="/api")
+        app.include_router(public_knowledge_router, prefix="/api")
+        app.add_exception_handler(DomainError, domain_error_handler)
+        app.dependency_overrides[get_required_user] = lambda: reader
         requests = []
 
         @app.middleware("http")
@@ -168,7 +174,9 @@ async def isolated_mcp(monkeypatch):
             db.add(row)
             await db.commit()
         runtime = SimpleNamespace(uid=reader.uid, knowledges="all", run_id="independent-run")
-        yield SimpleNamespace(sessions=sessions, reader=reader, owner=owner, runtime=runtime, row=row, requests=requests, base_url=base_url)
+        yield SimpleNamespace(
+            sessions=sessions, engine=engine, reader=reader, owner=owner, runtime=runtime, row=row, requests=requests, base_url=base_url
+        )
     finally:
         if http_server:
             http_server.should_exit = True
@@ -234,6 +242,45 @@ async def test_cached_catalog_recovers_tool_enabled_in_same_run(isolated_mcp):
     assert list_ids(await restored.ainvoke({})) == ["delegation-kb"]
 
 
+async def test_configured_mcp_recovers_after_transient_discovery_and_stays_bound(isolated_mcp, monkeypatch):
+    """直接配置的服务发现暂时失败后，后续模型请求恢复并持续绑定工具。"""
+    from langchain.agents.middleware.types import ModelRequest
+
+    from yuxi.modules.agents.runtime.middlewares.skills import SkillsMiddleware
+    from yuxi.modules.extensions.tools.runtime import resolve_configured_runtime_tools
+
+    context = isolated_mcp
+    runtime = context.runtime
+    runtime.tools, runtime.mcps, runtime.mcp_unavailable = [], ["knowledge"], {}
+    runtime.skill_runtime_snapshot = {"effective_skills": [], "preloaded_skills": [], "runtime_skills": {}, "skill_metadata": {}}
+    original_loader = service.load_mcp_tools
+    attempts = 0
+
+    async def discover(*args, **kwargs):
+        """仅让首次发现发生临时故障，恢复后使用真实 MCP transport。"""
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("synthetic transient discovery failure")
+        return await original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(service, "load_mcp_tools", discover)
+    registered = await resolve_configured_runtime_tools(runtime)
+    assert "list_kbs" not in {tool.name for tool in registered}
+    request = ModelRequest(model=SimpleNamespace(), messages=[], tools=registered, state={}, runtime=SimpleNamespace(context=runtime))
+
+    async def model(current):
+        """读取正式中间件实际交付给模型的工具。"""
+        return {tool.name: tool for tool in current.tools}
+
+    middleware = SkillsMiddleware()
+    first = await middleware.awrap_model_call(request, model)
+    second = await middleware.awrap_model_call(request, model)
+    assert "list_kbs" in first and "list_kbs" in second
+    assert attempts == 2 and runtime.mcp_unavailable == {}
+    assert list_ids(await second["list_kbs"].ainvoke({})) == ["delegation-kb"]
+
+
 async def test_existing_tool_reflects_current_knowledge_visibility(isolated_mcp):
     """凭据和旧工具不能固化已撤销的知识库权限。"""
     context = isolated_mcp
@@ -247,6 +294,87 @@ async def test_existing_tool_reflects_current_knowledge_visibility(isolated_mcp)
     output = await tools["query_kb"].ainvoke({"kb_id": "delegation-kb", "query_text": "synthetic"})
     assert "404" in str(output)
     assert "Synthetic isolated source" not in str(output)
+
+
+@pytest.mark.skipif(os.getenv("RUN_ISOLATED_OBJECT_STORE") != "1", reason="需要独立的临时对象存储")
+async def test_mcp_document_pages_use_current_permission_and_bounded_wire_payload(isolated_mcp):
+    """真实 MCP、数据库与对象存储中，逐页恢复原文且撤权后不可访问。"""
+    from yuxi.infrastructure.minio import get_minio_client
+    from yuxi.infrastructure.minio.client import MinIOClient
+    from yuxi.modules.knowledge.mcp.auth import create_knowledge_token
+    from yuxi.modules.knowledge.models import KnowledgeFile
+
+    context = isolated_mcp
+    async with context.engine.begin() as connection:
+        await connection.run_sync(KnowledgeFile.__table__.create)
+    lines = [f"line-{index} " + "多字节正文" * 500 for index in range(8)]
+    store = get_minio_client()
+    bucket = MinIOClient.KB_BUCKETS["parsed"]
+    object_name = "delegation-kb/parsed/isolated-file.md"
+    uploaded = await store.aupload_file(bucket, object_name, "\n".join(lines).encode(), content_type="text/markdown")
+    try:
+        async with context.sessions() as db:
+            db.add(
+                KnowledgeFile(
+                    kb_id="delegation-kb", file_id="isolated-file", filename="document.md", markdown_file=uploaded.url, status="parsed"
+                )
+            )
+            await db.commit()
+        token = create_knowledge_token(uid=context.reader.uid, selection=["delegation-kb"])
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+        async with httpx.AsyncClient(base_url=context.base_url, headers=headers, trust_env=False) as client:
+
+            async def open_page(offset):
+                """经真实 MCP HTTP 读取指定偏移。"""
+                return await client.post(
+                    "/api/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "open_kb_document",
+                            "arguments": {"kb_id": "delegation-kb", "file_id": "isolated-file", "offset": offset},
+                        },
+                    },
+                )
+
+            offset, recovered, pages = 0, [], 0
+            while offset is not None:
+                response = await open_page(offset)
+                assert response.status_code == 200 and len(response.content) <= 64 * 1024
+                result = response.json()["result"]
+                assert result["isError"] is False
+                page = json.loads(result["content"][0]["text"])
+                assert page == result["structuredContent"]
+                recovered.extend(line.split("\t", 1)[1] for line in page["content"].splitlines())
+                offset = page["next_offset"]
+                pages += 1
+            assert pages > 1
+            assert recovered == lines
+            oversized_lines = [f"line-{index + 1}" for index in range(1200)]
+            oversized_lines[899] = "x" * 40000
+            await store.aupload_file(bucket, object_name, "\n".join(oversized_lines).encode(), content_type="text/markdown")
+            arguments = {"kb_id": "delegation-kb", "file_id": "isolated-file", "offset": 899, "window_size": 101}
+            too_large = await client.post("/api/v1/knowledge/tools/open_kb_document", json=arguments)
+            assert too_large.status_code == 413
+            assert too_large.json() == {"detail": {"code": "document_line_too_large", "message": "文档单行超过读取窗口字节上限"}}
+            following = await client.post("/api/v1/knowledge/tools/open_kb_document", json={**arguments, "offset": 900, "window_size": 100})
+            assert following.status_code == 200
+            following_page = following.json()
+            assert (following_page["start_line"], following_page["end_line"]) == (901, 1000)
+            assert [line.split("\t", 1)[1] for line in following_page["content"].splitlines()] == oversized_lines[900:1000]
+            mcp_too_large = await open_page(899)
+            assert mcp_too_large.json()["result"]["isError"] is True
+            async with context.sessions() as db:
+                kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.kb_id == "delegation-kb"))
+                kb.share_config = read_scope(context.owner.uid)
+                await db.commit()
+            denied = await open_page(0)
+            assert denied.json()["result"]["isError"] is True
+            assert "多字节正文" not in denied.text
+    finally:
+        await store.adelete_file(bucket, object_name)
 
 
 @pytest.mark.parametrize("admin_enabled", [0, 1])
@@ -498,6 +626,8 @@ async def test_deployment_toggle_preserves_builtin_identity_and_admin_policy(iso
 
 async def test_dynamic_skill_restores_reenabled_tool_with_same_run_cache(isolated_mcp):
     """动态 Skill 每轮读取当前策略，使用同一完整目录缓存恢复工具。"""
+    from langchain.agents.middleware.types import ModelRequest
+
     from yuxi.modules.agents.runtime.middlewares.skills import SkillsMiddleware
 
     context = isolated_mcp
@@ -512,17 +642,27 @@ async def test_dynamic_skill_restores_reenabled_tool_with_same_run_cache(isolate
         skill_runtime_snapshot={
             "effective_skills": ["dynamic-kb"],
             "preloaded_skills": [],
-            "runtime_skills": {"dynamic-kb": {"tools": [], "mcps": ["knowledge"], "skills": []}},
+            "runtime_skills": {
+                "dynamic-kb": {
+                    "name": "Dynamic knowledge",
+                    "description": "Knowledge fixture",
+                    "path": "/home/user/skills/dynamic-kb/SKILL.md",
+                    "tools": [],
+                    "mcps": ["knowledge"],
+                    "skills": [],
+                }
+            },
         },
     )
-    request = SimpleNamespace(runtime=SimpleNamespace(context=runtime), tools=[], state={"activated_skills": ["dynamic-kb"]})
-    request.override = lambda **values: SimpleNamespace(**{**vars(request), **values})
+    request = ModelRequest(
+        model=SimpleNamespace(), messages=[], runtime=SimpleNamespace(context=runtime), tools=[], state={"activated_skills": ["dynamic-kb"]}
+    )
 
     async def tools_for_model(current):
         """回读中间件真正交给模型的工具对象。"""
         return {tool.name: tool for tool in current.tools}
 
-    middleware = SkillsMiddleware(enable_skills_prompt=False)
+    middleware = SkillsMiddleware()
     await update_server(context, disabled_tools=["list_kbs"])
     first = await middleware.awrap_model_call(request, tools_for_model)
     assert "list_kbs" not in first

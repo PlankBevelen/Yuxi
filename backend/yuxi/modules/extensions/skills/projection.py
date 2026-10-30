@@ -14,6 +14,7 @@ from pathlib import Path
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.infrastructure.filesystem import await_io
 from yuxi.infrastructure.observability.logging import logger
 from yuxi.infrastructure.runtime_settings import get_skill_data_dir, get_skill_projection_dir
 from yuxi.modules.extensions.skills.models import Skill
@@ -55,7 +56,7 @@ async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_scope))"),
             {"lock_scope": f"{_USER_SKILL_PROJECTION_LOCK_SCOPE}{normalized_uid}"},
         )
-        await asyncio.to_thread(sync_user_accessible_skills, normalized_uid, source_dirs)
+        await await_io(asyncio.to_thread(sync_user_accessible_skills, normalized_uid, source_dirs))
         return source_dirs
 
 
@@ -79,7 +80,7 @@ async def invalidate_skill_projections(db: AsyncSession, slug: str) -> list[str]
             {"lock_scope": f"{_USER_SKILL_PROJECTION_LOCK_SCOPE}{uid}"},
         )
     for uid in uids:
-        await asyncio.to_thread(_remove_skill_from_user_projection, uid, slug)
+        await await_io(asyncio.to_thread(_remove_skill_from_user_projection, uid, slug))
     return uids
 
 

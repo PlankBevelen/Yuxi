@@ -36,18 +36,18 @@ async def lock_accessible_shared_skills_for_runtime(
 ) -> list[Skill]:
     """只锁定已选共享 Skill 及其依赖，锁后重新检查权限。"""
     repo = SkillRepository(db)
-    visible = {item.slug for item in await repo.list_enabled_readable(user)}
-    if bound_slug:
-        visible.add(bound_slug)
     shadowed = shadowed_slugs or set()
     pending = list(selected)
     locked: dict[str, Skill] = {}
     while pending:
         slug = pending.pop(0)
-        if slug in shadowed or slug not in visible or slug in locked:
+        if slug in shadowed or slug in locked:
+            continue
+        candidate = await repo.get_by_slug(slug)
+        if candidate is None or (candidate.bound_agent_id is not None and slug != bound_slug) or not user_can_access_skill(user, candidate):
             continue
         item = await repo.get_by_slug_for_read(slug)
-        if item is None or not user_can_access_skill(user, item):
+        if item is None or (item.bound_agent_id is not None and slug != bound_slug) or not user_can_access_skill(user, item):
             continue
         locked[slug] = item
         pending.extend(item.skill_dependencies or [])

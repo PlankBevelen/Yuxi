@@ -14,6 +14,7 @@ from pydantic import Field
 
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.modules.agents.repositories.cooperation import CooperationRepository
+from yuxi.modules.agents.runtime.state import BaseState
 from yuxi.modules.system.options import system_options
 from yuxi.shared.errors import InvalidOperationError
 
@@ -46,8 +47,16 @@ def create_cooperation_middleware(context):
     return CooperationMiddleware() if getattr(context, "run_id", None) and getattr(context, "uid", None) else None
 
 
+class CooperationState(BaseState):
+    """记录协作消息已消费的位置。"""
+
+    cooperation_cursor: int
+
+
 class CooperationMiddleware(AgentMiddleware):
     """通过统一服务派发工作，在模型安全边界消费持久消息。"""
+
+    state_schema = CooperationState
 
     def __init__(self):
         """构造协作、精确结果与持久等待入口。"""

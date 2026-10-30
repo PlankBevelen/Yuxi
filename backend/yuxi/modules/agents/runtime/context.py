@@ -523,7 +523,7 @@ async def prepare_agent_runtime_context(
 
 
 async def refresh_agent_context_resources(context: BaseContext, *, db, user, agent=None) -> None:
-    """共用当前资源解析，保留原选择与本 Run 已注入的专属根文本。"""
+    """共用当前资源解析，保留原始资源选择。"""
     from yuxi.modules.extensions.skills.runtime import resolve_runtime_skills_for_context
 
     resource_fields = type(context).get_resource_fields()
@@ -535,12 +535,7 @@ async def refresh_agent_context_resources(context: BaseContext, *, db, user, age
     for name in resource_fields:
         setattr(context, name, normalized[name])
 
-    previous = context.skill_runtime_snapshot
     current = await resolve_runtime_skills_for_context(context, db=db, user=user, agent=agent)
-    if previous is not None:
-        for slug, metadata in previous["skill_metadata"].items():
-            if metadata["source_scope"] == "agent_bound" and slug in current["preloaded_skill_contents"]:
-                current["preloaded_skill_contents"][slug] = previous["preloaded_skill_contents"][slug]
     context.skill_runtime_snapshot = current
     context.skills = current["context_skills"]
     context.preload_skills = current["context_preload_skills"]

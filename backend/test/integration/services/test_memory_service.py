@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.modules.agents.services.memory_history import MemoryHistoryService
@@ -133,6 +134,44 @@ async def test_concurrent_writes_are_serialized_without_lost_updates(memory_data
     assert {first["status"], second["status"]} == {"updated"}
     assert stored.count("并发记忆 A") == 1
     assert stored.count("并发记忆 B") == 1
+
+
+@pytest.mark.self_managed_resources
+async def test_cancelled_memory_write_keeps_lock_until_file_replace_finishes(memory_database, monkeypatch):
+    """取消后保留事务锁直到文件替换完成，下一写入不得丢失前一次结果。"""
+    session_factory, identity = memory_database
+    entered = threading.Event()
+    release = threading.Event()
+    replace = memory_service._replace_memory_file
+
+    def blocked_replace(uid, updated):
+        """暂停实际替换，观察取消期间的数据库锁。"""
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("测试没有释放文件写入")
+        return replace(uid, updated)
+
+    monkeypatch.setattr(memory_service, "_replace_memory_file", blocked_replace)
+    first = asyncio.create_task(memory_service.remember_memory(**identity, content="取消中的记忆"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        first.cancel()
+        async with session_factory() as db:
+            acquired = await db.scalar(
+                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"user-memory:{identity['uid']}"},
+            )
+            assert acquired is False
+        assert not first.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    monkeypatch.setattr(memory_service, "_replace_memory_file", replace)
+    await memory_service.remember_memory(**identity, content="后续记忆")
+    stored = Workspace(identity["uid"]).read_authorized_file(memory_service.MEMORY_PATH, 4096).decode()
+    assert stored.count("取消中的记忆") == 1
+    assert stored.count("后续记忆") == 1
 
 
 async def test_write_rechecks_switch_and_current_lease_owner(memory_database):

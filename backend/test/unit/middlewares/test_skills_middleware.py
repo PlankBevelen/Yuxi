@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain.tools.tool_node import ToolCallRequest
@@ -44,6 +45,18 @@ def _runtime_skill(
     }
 
 
+def _as_model_request(request):
+    """将测试上下文装配为支持完整提示与工具替换的正式请求。"""
+    return ModelRequest(
+        model=SimpleNamespace(),
+        messages=[],
+        system_message=getattr(request, "system_message", None),
+        tools=getattr(request, "tools", []),
+        state=request.state,
+        runtime=request.runtime,
+    )
+
+
 async def _authorized_model_call(monkeypatch, middleware, request, handler, *, mcp_policy=None):
     """按生产顺序组合 Skills 与真实授权中间件，只替换持久权限读取。"""
     from yuxi.modules.agents.runtime.middlewares import authorization
@@ -61,7 +74,7 @@ async def _authorized_model_call(monkeypatch, middleware, request, handler, *, m
         """最终工具集交给生产授权实现。"""
         return await authorization.RuntimeAuthorizationMiddleware().awrap_model_call(current, handler)
 
-    return await middleware.awrap_model_call(request, authorize)
+    return await middleware.awrap_model_call(_as_model_request(request), authorize)
 
 
 @pytest.mark.asyncio
@@ -207,7 +220,7 @@ async def test_awrap_model_call_mounts_dependencies_only_for_readable_activated_
         captured["tools"] = [tool.name for tool in request.tools]
         return "ok"
 
-    result = await _authorized_model_call(monkeypatch, SkillsMiddleware(enable_skills_prompt=False), FakeRequest(), handler)
+    result = await _authorized_model_call(monkeypatch, SkillsMiddleware(), FakeRequest(), handler)
 
     assert result == "ok"
     assert captured["tools"] == ["tool-a"]
@@ -254,7 +267,7 @@ async def test_awrap_model_call_mounts_knowledge_base_skill_tools(monkeypatch):
         captured["tools"] = {tool.name for tool in request.tools}
         return "ok"
 
-    result = await _authorized_model_call(monkeypatch, SkillsMiddleware(enable_skills_prompt=False), FakeRequest(), handler)
+    result = await _authorized_model_call(monkeypatch, SkillsMiddleware(), FakeRequest(), handler)
 
     assert result == "ok"
     assert captured["tools"] == {
@@ -355,7 +368,7 @@ async def test_unactivated_skill_cannot_hide_base_tools(monkeypatch):
         """读取实际交给模型的工具集合。"""
         return [tool.name for tool in current.tools]
 
-    visible = await _authorized_model_call(monkeypatch, SkillsMiddleware(enable_skills_prompt=False), request, handler)
+    visible = await _authorized_model_call(monkeypatch, SkillsMiddleware(), request, handler)
     assert visible == ["ask_user_question", "mark_for_improvement"]
 
 
@@ -403,7 +416,7 @@ async def test_preloaded_skill_rejects_duplicate_mcp_tool_names(monkeypatch):
             "context_skills": [],
             "context_preload_skills": [],
             "skill_metadata": {},
-            "preloaded_skill_contents": {},
+            "preloaded_skill_contents": {"report": "# Report instructions"},
             "effective_skills": ["report"],
             "preloaded_skills": ["report"],
             "runtime_skills": {"report": _runtime_skill("report", mcps=["charts", "conflicting-charts"])},
@@ -421,9 +434,9 @@ async def test_preloaded_skill_rejects_duplicate_mcp_tool_names(monkeypatch):
             request.runtime = self.runtime
             return request
 
-    middleware = SkillsMiddleware(enable_skills_prompt=False)
+    middleware = SkillsMiddleware()
     with pytest.raises(RuntimeError, match="Skill MCP 工具名冲突"):
-        await middleware.awrap_model_call(FakeRequest([]), AsyncMock())
+        await middleware.awrap_model_call(_as_model_request(FakeRequest([])), AsyncMock())
 
 
 @pytest.mark.asyncio
@@ -477,7 +490,7 @@ async def test_activated_mcp_rejects_name_of_inactive_registered_skill_tool(monk
 
     registered_local_tool = SimpleNamespace(name="chart_tool")
     with pytest.raises(RuntimeError, match="Skill MCP 工具名冲突：chart_tool"):
-        await SkillsMiddleware(enable_skills_prompt=False).awrap_model_call(FakeRequest([registered_local_tool]), AsyncMock())
+        await SkillsMiddleware().awrap_model_call(_as_model_request(FakeRequest([registered_local_tool])), AsyncMock())
 
 
 @pytest.mark.asyncio
@@ -510,7 +523,7 @@ async def test_preloaded_skill_exposes_mcp_tool_on_first_model_call(monkeypatch)
             "context_skills": [],
             "context_preload_skills": [],
             "skill_metadata": {},
-            "preloaded_skill_contents": {},
+            "preloaded_skill_contents": {"report": "# Report instructions"},
             "effective_skills": ["report"],
             "preloaded_skills": ["report"],
             "runtime_skills": {"report": _runtime_skill("report", mcps=["charts"])},
@@ -534,7 +547,7 @@ async def test_preloaded_skill_exposes_mcp_tool_on_first_model_call(monkeypatch)
         captured.append([item.name for item in request.tools])
         return "ok"
 
-    assert await SkillsMiddleware(enable_skills_prompt=False).awrap_model_call(FakeRequest([]), handler) == "ok"
+    assert await SkillsMiddleware().awrap_model_call(_as_model_request(FakeRequest([])), handler) == "ok"
     assert captured == [["chart_tool"]]
 
 
@@ -592,10 +605,10 @@ async def test_activated_skill_loads_mcp_without_agent_selection(monkeypatch):
         captured.append([item.name for item in request.tools])
         return "ok"
 
-    middleware = SkillsMiddleware(enable_skills_prompt=False)
-    await middleware.awrap_model_call(FakeRequest({}), handler)
+    middleware = SkillsMiddleware()
+    await middleware.awrap_model_call(_as_model_request(FakeRequest({})), handler)
     assert calls == []
-    await middleware.awrap_model_call(FakeRequest({"activated_skills": ["report"]}), handler)
+    await middleware.awrap_model_call(_as_model_request(FakeRequest({"activated_skills": ["report"]})), handler)
 
     assert calls == ["charts"]
     assert captured == [[], ["chart_tool"]]
@@ -644,7 +657,7 @@ async def test_skill_reusing_explicit_mcp_server_does_not_duplicate_registered_t
             "context_skills": [],
             "context_preload_skills": [],
             "skill_metadata": {},
-            "preloaded_skill_contents": {},
+            "preloaded_skill_contents": {"report": "# Report instructions"},
             "effective_skills": ["report"],
             "preloaded_skills": ["report"],
             "runtime_skills": {"report": _runtime_skill("report", mcps=["charts"])},
@@ -668,10 +681,10 @@ async def test_skill_reusing_explicit_mcp_server_does_not_duplicate_registered_t
         captured.append([item.name for item in request.tools])
         return "ok"
 
-    middleware = SkillsMiddleware(enable_skills_prompt=False)
-    assert await middleware.awrap_model_call(FakeRequest([chart_tool]), handler) == "ok"
+    middleware = SkillsMiddleware()
+    assert await middleware.awrap_model_call(_as_model_request(FakeRequest([chart_tool])), handler) == "ok"
     assert captured == [["chart_tool"]]
-    assert calls == []
+    assert calls == ["charts"]
 
 
 @pytest.mark.asyncio
@@ -764,7 +777,7 @@ async def test_awrap_model_call_hides_gated_tools_until_activated(monkeypatch):
         captured["tools"] = {tool.name for tool in req.tools}
         return "ok"
 
-    await _authorized_model_call(monkeypatch, SkillsMiddleware(enable_skills_prompt=False), request, handler)
+    await _authorized_model_call(monkeypatch, SkillsMiddleware(), request, handler)
 
     assert captured["tools"] == {"read_file"}
 
@@ -778,7 +791,7 @@ async def test_awrap_model_call_keeps_gated_tools_when_activated(monkeypatch):
         captured["tools"] = {tool.name for tool in req.tools}
         return "ok"
 
-    await _authorized_model_call(monkeypatch, SkillsMiddleware(enable_skills_prompt=False), request, handler)
+    await _authorized_model_call(monkeypatch, SkillsMiddleware(), request, handler)
 
     assert captured["tools"] == {"read_file", "list_kbs", "query_kb"}
 
@@ -909,10 +922,11 @@ async def test_mcp_failure_reaches_runtime_instead_of_removing_tools(monkeypatch
             context.skill_runtime_snapshot = {
                 "effective_skills": ["report"],
                 "preloaded_skills": ["report"],
+                "preloaded_skill_contents": {"report": "# Report instructions"},
                 "runtime_skills": {"report": _runtime_skill("report", mcps=["demo"])},
             }
             request = SimpleNamespace(runtime=SimpleNamespace(context=context), state={})
-            await SkillsMiddleware(enable_skills_prompt=False).awrap_model_call(request, AsyncMock())
+            await SkillsMiddleware().awrap_model_call(_as_model_request(request), AsyncMock())
     assert caught.value is failure
     assert context.mcp_tool_servers == {}
 
@@ -958,8 +972,8 @@ async def test_skill_does_not_reintroduce_unconfigured_web_tools(configured):
         assert names == ({"web_search", "web_fetch"} if configured else set())
         return "ok"
 
-    result = await SkillsMiddleware(enable_skills_prompt=False).awrap_model_call(
-        Request([web_search, web_fetch] if configured else []),
+    result = await SkillsMiddleware().awrap_model_call(
+        _as_model_request(Request([web_search, web_fetch] if configured else [])),
         inspect,
     )
     assert result == "ok"
@@ -987,7 +1001,7 @@ async def test_unconnected_mcp_preserves_chat_and_hides_skill_dependencies(monke
             "context_preload_skills": [],
             "skill_metadata": {},
             "preloaded_skills": ["report"] if via_skill else [],
-            "preloaded_skill_contents": {},
+            "preloaded_skill_contents": {"report": "# Report instructions"},
             "effective_skills": ["report"],
             "runtime_skills": {"report": _runtime_skill("report", tools=["list_kbs"], mcps=["attendance"])},
         },
@@ -996,6 +1010,7 @@ async def test_unconnected_mcp_preserves_chat_and_hides_skill_dependencies(monke
         snapshot = context.skill_runtime_snapshot
         snapshot["effective_skills"].append("parent")
         snapshot["preloaded_skills"] = ["parent", "report"]
+        snapshot["preloaded_skill_contents"]["parent"] = "# Parent instructions"
         snapshot["runtime_skills"]["report"]["tools"] = []
         snapshot["runtime_skills"]["parent"] = _runtime_skill("parent", tools=["list_kbs"])
         snapshot["runtime_skills"]["parent"]["skills"] = ["report"]
@@ -1023,10 +1038,11 @@ async def test_unconnected_mcp_preserves_chat_and_hides_skill_dependencies(monke
         observed.append(request)
         return "normal chat"
 
-    middleware = SkillsMiddleware(enable_skills_prompt=False)
+    middleware = SkillsMiddleware()
     for _ in range(2):
         assert await _authorized_model_call(monkeypatch, middleware, Request(), handler) == "normal chat"
-    assert _system_message_text(observed[0].system_message) == "base"
+    assert _system_message_text(observed[0].system_message).startswith("base")
+    assert "report" in _system_message_text(observed[0].system_message)
     assert {tool.name for tool in observed[0].tools} == {"read_file"}
 
 
@@ -1073,7 +1089,7 @@ async def test_dynamic_parent_uses_service_result_for_nested_mcp_dependency(monk
 
     names = await _authorized_model_call(
         monkeypatch,
-        SkillsMiddleware(enable_skills_prompt=False),
+        SkillsMiddleware(),
         Request([SimpleNamespace(name="list_kbs")]),
         handler,
         mcp_policy=mcp_policy,

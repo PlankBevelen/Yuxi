@@ -377,13 +377,15 @@ async def resolve_runtime_mcp_tools(
                 return await load_mcp_tools(server.slug, config, disabled_tools=[])
             return await get_mcp_tools(server.slug, additional_servers={server.slug: config}, disabled_tools=[])
         except Exception as exc:
-            unavailable[server.slug] = runtime_mcp_failure_message(exc)
+            reason, permanent = runtime_mcp_failure(exc)
+            if permanent:
+                unavailable[server.slug] = reason
             logger.warning(
                 "MCP discovery unavailable: server={}, uid={}, error_type={}, reason={}",
                 server.slug,
                 uid,
                 type(exc).__name__,
-                unavailable[server.slug],
+                reason,
             )
             return None
 
@@ -397,21 +399,28 @@ async def resolve_runtime_mcp_tools(
     }
 
 
-def runtime_mcp_failure_message(exc: Exception) -> str:
-    """展开任务组和异常链，仅将已知业务原因转换为可公开提示。"""
-    from yuxi.shared.errors import StateConflictError
+def runtime_mcp_failure(exc: Exception) -> tuple[str, bool]:
+    """统一解释 MCP 错误；只有确定的凭据配置问题在本次运行禁用服务。"""
+    from langgraph.errors import GraphBubbleUp
 
+    from yuxi.modules.knowledge.mcp.client import KnowledgeMCPRuntimeError
+    from yuxi.shared.errors import PermissionDeniedError, StateConflictError
+
+    if isinstance(exc, (PermissionError, PermissionDeniedError, GraphBubbleUp)):
+        raise exc
+    if isinstance(exc, KnowledgeMCPRuntimeError):
+        return "运行上下文缺少可信知识库范围，能力未装配", True
     if isinstance(exc, StateConflictError):
         if exc.code == "mcp_oauth_unconfigured":
-            return "部署未配置有效的 MCP 凭据加密密钥，请联系管理员"
+            return "部署未配置有效的 MCP 凭据加密密钥，请联系管理员", True
         if exc.code == "mcp_reconnect_required":
-            return "授权凭据不可用或已失效，请在扩展页面重新连接"
+            return "授权凭据不可用或已失效，请在扩展页面重新连接", True
     if isinstance(exc, ExceptionGroup):
-        reasons = dict.fromkeys(runtime_mcp_failure_message(child) for child in exc.exceptions)
-        return "；".join(reasons)
-    if exc.__cause__ is not None and isinstance(exc.__cause__, Exception):
-        return runtime_mcp_failure_message(exc.__cause__)
-    return "服务连接或调用失败，请检查 MCP 服务后重试"
+        failures = [runtime_mcp_failure(child) for child in exc.exceptions]
+        return "；".join(dict.fromkeys(reason for reason, _ in failures)), any(permanent for _, permanent in failures)
+    if isinstance(exc.__cause__, Exception):
+        return runtime_mcp_failure(exc.__cause__)
+    return "服务连接或调用失败，请检查 MCP 服务后重试", False
 
 
 async def available_mcp_servers(db: AsyncSession, server_slugs, *, user_id: int) -> dict[str, MCPServer]:

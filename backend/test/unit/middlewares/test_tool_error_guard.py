@@ -10,6 +10,7 @@ ToolMessage，同时放行 GraphBubbleUp（interrupt 门禁）与取消/进程�
 
 import asyncio
 import inspect
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -448,8 +449,9 @@ async def test_graph_mounts_guard_as_outermost_tool_wrapper(monkeypatch, module,
 
     from yuxi.modules.agents.runtime.middlewares.authorization import RuntimeAuthorizationMiddleware
 
-    assert isinstance(middlewares[-2], RuntimeAuthorizationMiddleware)
-    assert isinstance(middlewares[-1], chatbot_graph.ImageInputCompatibilityMiddleware)
+    assert isinstance(middlewares[-3], RuntimeAuthorizationMiddleware)
+    assert isinstance(middlewares[-2], chatbot_graph.ImageInputCompatibilityMiddleware)
+    assert isinstance(middlewares[-1], chatbot_graph.TokenUsageMiddleware)
     assert isinstance(middlewares[0], ToolErrorGuardMiddleware), "授权失败必须在异常隔离外传播"
 
 
@@ -478,30 +480,45 @@ async def test_guard_keeps_normal_tool_result_untouched():
     assert [message.content for message in tool_messages] == ["parsed:/home/user/workspace/a.pdf"]
 
 
-async def test_cancel_waits_for_tool_effect_before_releasing_execution():
-    """取消 await 不能把仍执行的工具副作用误报为已清理。"""
-    entered = asyncio.Event()
-    finish = asyncio.Event()
-    effects = []
+async def test_cancel_reaches_sandbox_executor_and_waits_for_cleanup(monkeypatch):
+    """取消通过 guard 到达真实 backend 的线程事件，并等待执行器清理。"""
+    from yuxi.modules.agents.runtime.sandbox import backend as sandbox_module
+
+    entered = threading.Event()
+    cancelled = threading.Event()
+    release = threading.Event()
+    cleaned = threading.Event()
+
+    class Provider:
+        def execute(self, uid, command, cwd, timeout, cancel_event, **kwargs):
+            entered.set()
+            if not cancel_event.wait(10):
+                raise TimeoutError("未收到取消")
+            cancelled.set()
+            if not release.wait(10):
+                raise TimeoutError("清理未释放")
+            cleaned.set()
+            return "", 0, False
+
+    monkeypatch.setattr(sandbox_module, "get_sandbox_provider", lambda: Provider())
+    backend = sandbox_module.UserSandboxBackend(uid="test-user")
 
     async def handler(request):
-        entered.set()
-        await finish.wait()
-        effects.append("finished")
-        return ToolMessage(content="done", tool_call_id="call")
+        return await backend.aexecute("command")
 
     request = _tool_call_request({"id": "call", "name": "execute"})
     task = asyncio.create_task(ToolErrorGuardMiddleware().awrap_tool_call(request, handler))
-    await entered.wait()
-    task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done() and effects == []
-    assert request.runtime.emitted == []
-    finish.set()
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        task.cancel()
+        assert await asyncio.to_thread(cancelled.wait, 10)
+        assert not task.done()
+        assert not cleaned.is_set()
+    finally:
+        release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert effects == ["finished"]
-    assert request.runtime.emitted == []
+    assert cleaned.is_set()
 
 
 @pytest.mark.parametrize("failure_type", [RuntimeError, ValueError])
