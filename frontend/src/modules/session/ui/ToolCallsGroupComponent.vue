@@ -36,11 +36,17 @@
     >
       <div class="tool-calls-collapse-inner">
         <div class="tool-calls-panel">
-          <div v-for="entry in displayEntries" :key="entry.key" class="tool-call-container">
+          <div v-for="entry in groupedEntries" :key="entry.key" class="tool-call-container">
             <ReasoningBlockComponent
               v-if="entry.type === 'reasoning'"
               :content="entry.content"
               :is-active="isActive && entry === displayEntries[displayEntries.length - 1]"
+            />
+            <CooperationTool
+              v-else-if="entry.type === 'cooperation'"
+              :tool-call="entry.toolCalls[0]"
+              :tool-calls="entry.toolCalls"
+              :cooperation-view="cooperationView"
             />
             <ToolCallRenderer
               v-else
@@ -57,11 +63,12 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, defineAsyncComponent } from 'vue'
 import { ChevronDown, Atom } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { useAgentStore } from '@/modules/agents'
 import ReasoningBlockComponent from '@/modules/session/ui/ReasoningBlockComponent.vue'
+import { groupCooperationEntries } from '@/modules/session/model/cooperationToolView'
 import { ToolCallRenderer } from '@/modules/session/ui/tools/index.js'
 import {
   getToolCallId,
@@ -70,6 +77,8 @@ import {
   findToolInList,
   normalizeToolCalls
 } from '@/modules/session/ui/tools/toolRegistry'
+
+const CooperationTool = defineAsyncComponent(() => import('@/modules/session/ui/tools/renderers/CooperationTool.vue'))
 
 const agentStore = useAgentStore()
 const { availableTools, toolMetadata } = storeToRefs(agentStore)
@@ -102,6 +111,7 @@ const displayEntries = computed(() =>
         toolCall
       }))
 )
+const groupedEntries = computed(() => props.cooperationView ? groupCooperationEntries(displayEntries.value) : displayEntries.value)
 const hasReasoning = computed(() =>
   displayEntries.value.some((entry) => entry.type === 'reasoning')
 )

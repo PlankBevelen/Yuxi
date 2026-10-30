@@ -93,7 +93,7 @@
             <div class="settings-form-copy">
               <label class="settings-form-label" for="max-cooperation-depth">最大协作深度</label>
               <p class="settings-form-description" id="cooperation-depth-help">
-                根对话为第 0 层，默认允许 2 层协作；设为 0 可关闭新增协作会话。
+                根对话为第 0 层，默认允许 2 层协作；设为 0 可关闭新增子会话。
               </p>
             </div>
             <div class="settings-form-control is-number">

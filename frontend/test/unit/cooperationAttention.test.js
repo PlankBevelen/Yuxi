@@ -1,3 +1,4 @@
+import { createMemoryHistory, createRouter, routerKey } from 'vue-router'
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { setImmediate } from 'node:timers'
@@ -136,6 +137,7 @@ test('慢等待点恢复后才聚焦，隐藏或轮次变化撤销聚焦', async
     return () => null
   } })
   app.use(pinia)
+  app.provide(routerKey, createRouter({ history: createMemoryHistory('/'), routes: [] }))
   app.provide(ssrContextKey, {})
   app.mount({ children: [] })
   t.after(() => {

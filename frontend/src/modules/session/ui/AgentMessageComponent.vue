@@ -1,4 +1,17 @@
 <template>
+  <div v-if="message.type === 'human' && message.input_origin" class="message-origin">
+    <component
+      :is="message.input_origin.target ? 'button' : 'span'"
+      :type="message.input_origin.target ? 'button' : undefined"
+      class="message-origin-label"
+      :title="message.input_origin.label"
+      @click="message.input_origin.target && emit('open-session', message.input_origin.target)"
+    >
+      <GitBranch :size="13" aria-hidden="true" />
+      <span>由 {{ message.input_origin.label }} 创建</span>
+      <ArrowUpRight v-if="message.input_origin.target" :size="12" aria-hidden="true" />
+    </component>
+  </div>
   <div v-if="message.type === 'human' && messageImages.length" class="message-image">
     <img
       v-for="(image, index) in messageImages"
@@ -122,7 +135,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import RefsComponent from '@/modules/session/ui/RefsComponent.vue'
-import { Check, Copy } from '@lucide/vue'
+import { Check, Copy, GitBranch, ArrowUpRight } from '@lucide/vue'
 import ChatImageViewer from '@/shared/ui/ChatImageViewer.vue'
 import ToolCallsGroupComponent from '@/modules/session/ui/ToolCallsGroupComponent.vue'
 import ReferenceAnnotatedAnswer from '@/modules/session/ui/ReferenceAnnotatedAnswer.vue'
@@ -174,7 +187,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs'])
+const emit = defineEmits(['open-session', 'retry', 'retryStoppedMessage', 'openRefs'])
 
 // 图片全屏预览
 const imagePreview = ref({ src: '', alt: '' })
@@ -585,5 +598,21 @@ const parsedData = computed(() => {
 
 .message-md {
   margin: 8px 0;
+}
+</style>
+
+<style scoped lang="less">
+.message-origin { display: flex; justify-content: flex-end; margin: 4px 0 6px; }
+.message-origin-label {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 2px 0; border: 0; background: transparent; color: var(--color-text-secondary);
+  font: inherit; font-size: 12px; line-height: 1.5; text-align: left;
+  span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  svg { flex-shrink: 0; }
+}
+button.message-origin-label {
+  cursor: pointer;
+  &:hover { color: var(--color-text); }
+  &:focus-visible { outline: 2px solid var(--main-300); outline-offset: 2px; border-radius: 3px; }
 }
 </style>

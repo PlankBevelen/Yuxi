@@ -30,7 +30,7 @@ const settle = async () => {
 }
 
 /** 组合真实摘要观察者与共享 runtime，详情协议独立于摘要。 */
-function setup(t, { status = 'completed' } = {}) {
+function setup(t, { status = 'completed', singleRoot = false } = {}) {
   t.mock.method(ErrorHandler, 'handleError', () => {})
   const saved = { ...api }
   const pinia = createPinia()
@@ -50,7 +50,7 @@ function setup(t, { status = 'completed' } = {}) {
     yuxi: { message_id: current.turnId, run_id: current.runId }
   })
   Object.assign(api, {
-    getCooperationSummary: async () => ({ sessions: [{ session_id: 'root' }, {
+    getCooperationSummary: async () => ({ sessions: [...(singleRoot ? [] : [{ session_id: 'root' }]), {
       session_id: 'child', turn_id: current.turnId, current_run_id: current.runId,
       result_run_id: current.status === 'completed' ? current.runId : null,
       turn_status: current.status === 'requires_action' ? 'waiting' : current.status,
@@ -274,7 +274,7 @@ test('根页面失活后的迟到摘要不能更新成员，重新激活后追�
   assert.equal(h.runtime.threadMessages.child.at(-1).content, '恢复后新内容')
 })
 
-test('执行摘要不变时仍发现第二条外部排队输入，普通单会话不增加详情读取', async (t) => {
+test('执行摘要不变时发现外部排队输入，独立根会话也继续读取队列', async (t) => {
   const h = setup(t)
   h.current.pending = true
   await settle()
@@ -289,7 +289,7 @@ test('执行摘要不变时仍发现第二条外部排队输入，普通单会�
   h.current.inputIds.push('single-session-input')
   await h.cooperation.refresh()
   await settle()
-  assert.equal(h.runtime.getThreadState('child').queuedInputs.length, 2)
+  assert.equal(h.runtime.getThreadState('child').queuedInputs.length, 3)
 })
 
 test('新 Turn 取代仍持有旧 SSE 的轮次时，关闭旧连接并订阅新轮次', async (t) => {
@@ -329,4 +329,17 @@ test('摘要变化后的对账不共用变化之前的在途恢复快照', async
   assert.equal(h.runtime.getThreadState('child').currentTurnId, 'latest-turn')
   assert.equal(h.runtime.getThreadState('child').activeRunId, 'latest-run')
   assert.equal(h.counts().subscriptions, 1)
+})
+
+test('独立根会话已打开时，单成员摘要也发现跨树新任务并刷新历史', async t => {
+  const h = setup(t, { singleRoot: true })
+  await settle()
+  h.current.turnId = 'external-root-turn'
+  h.current.runId = 'external-root-run'
+  h.current.status = 'in_progress'
+  h.current.output = '跨树派发的新任务结果'
+  await h.cooperation.refresh()
+  await settle()
+  assert.equal(h.runtime.getThreadState('child').currentTurnId, 'external-root-turn')
+  assert.equal(h.runtime.threadMessages.child.at(-1).content, '跨树派发的新任务结果')
 })

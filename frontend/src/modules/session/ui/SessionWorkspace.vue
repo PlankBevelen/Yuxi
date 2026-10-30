@@ -132,19 +132,20 @@
                       :widgets-disabled="row.group.status === 'streaming' || widgetActionsDisabled"
                       @retry="retryMessage(displayItem.message)"
                       @open-refs="openTurnSourcesPanel"
+                      @open-session="navigateToSession"
                     >
                     </AgentMessageComponent>
                     <ToolCallsGroupComponent
                       v-else-if="displayItem.type === 'tool-group'"
                       :tool-calls="displayItem.toolCalls"
                       :entries="displayItem.entries"
-                      :cooperation-view="props.embedded ? null : cooperationToolView"
+                      :cooperation-view="cooperationToolView"
                       :is-active="isToolGroupActive(row.group, itemIndex, row.displayItems)"
                     />
                     <RunProcessGroupComponent
                       v-else
                       :items="displayItem.items"
-                      :cooperation-view="props.embedded ? null : cooperationToolView"
+                      :cooperation-view="cooperationToolView"
                       :message-count="displayItem.messageCount"
                       :tool-call-count="displayItem.toolCallCount"
                       :duration-ms="displayItem.durationMs"
@@ -679,6 +680,8 @@
                 :visible="
                   workspaceActive && isFilePanelOpen && agentPanelActiveSectionKey === section.key
                 "
+                @open-session="navigateToSession"
+                :cooperation-members="cooperationSessions"
                 :embedded-thread-id="section.sessionId"
                 :agent-id="currentAgentId"
                 :is-new-session="false"
@@ -707,6 +710,8 @@ import {
   getCurrentInstance
 } from 'vue'
 import { message } from 'ant-design-vue'
+import { useRouter } from 'vue-router'
+import { createSessionLinkNavigator } from '@/modules/session/model/sessionLinks'
 import {
   ArrowUpFromLine,
   Bug,
@@ -771,6 +776,7 @@ import { resumeSessionWaitpoint } from '@/modules/session/model/sessionCommands'
 import { useSessionCooperation } from '@/modules/session/model/useSessionCooperation'
 import CooperationTree from '@/modules/session/ui/CooperationTree.vue'
 import { useAgentMentionConfig } from '@/modules/session/model/useAgentMentionConfig'
+import { getToolCallId, parseToolCallResult } from '@/modules/session/model/toolCallProjection'
 import { collectCooperationTasks } from '@/modules/session/model/cooperationToolView'
 import AgentArtifactsCard from '@/modules/session/ui/AgentArtifactsCard.vue'
 import { normalizeArtifacts } from '@/modules/session/model/artifacts'
@@ -806,12 +812,14 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
   visible: { type: Boolean, default: true },
   embeddedThreadId: { type: String, default: '' },
+  cooperationMembers: { type: Array, default: () => [] },
   agentId: { type: String, default: '' },
   initialProjectId: { type: String, default: '' },
   isNewSession: { type: Boolean, required: true },
   sendDisabled: { type: Boolean, default: false }
 })
-const emit = defineEmits(['thread-change'])
+const emit = defineEmits(['thread-change', 'open-session'])
+const router = useRouter()
 
 // ==================== STORE MANAGEMENT ====================
 const agentStore = useAgentStore()
@@ -1534,7 +1542,45 @@ const openCooperationTree = () => {
   statePanelOpen.value = false
 }
 
-const openCooperationSession = (sessionId) => {
+const sessionLinkNavigator = createSessionLinkNavigator({
+  router,
+  resolveTarget: (target) => agentApi.getSessionNavigation(target),
+  isActive: () => workspaceActive.value,
+  openTarget(destination) {
+    if (destination.tree_root_session_id === currentChatId.value) {
+      if (destination.parent_session_id) openCooperationSession(destination.session_id, destination.name)
+      else if (isAgentPanelMaximized.value) agentPanelActiveSectionKey.value = 'main-session'
+      else isFilePanelOpen.value = false
+    }
+  },
+  onError: (error) => handleChatError(error, 'load')
+})
+watch([workspaceActive, currentChatId, () => router.currentRoute.value], () => sessionLinkNavigator.invalidate(), { flush: 'sync' })
+onUnmounted(() => sessionLinkNavigator.invalidate())
+
+/** 嵌入会话把导航交给根工作区，避免侧栏递归嵌套。 */
+async function navigateToSession(target) {
+  if (props.embedded) emit('open-session', target)
+  else await sessionLinkNavigator.navigate(target)
+}
+
+/** 路由恢复先校验成员属于当前根页面，再打开侧栏。 */
+async function openSessionFromRoute(sessionId) {
+  if (!sessionId) {
+    if (isAgentPanelMaximized.value) agentPanelActiveSectionKey.value = 'main-session'
+    else if (agentPanelSections.value.find((section) => section.key === agentPanelActiveSectionKey.value)?.type === 'session') {
+      isFilePanelOpen.value = false
+    }
+    return
+  }
+  const target = await agentApi.getSessionNavigation(sessionId)
+  if (target.tree_root_session_id !== currentChatId.value || !target.parent_session_id) {
+    throw new Error('会话不属于当前主页面')
+  }
+  openCooperationSession(target.session_id, target.name)
+}
+
+const openCooperationSession = (sessionId, title) => {
   if (sessionId === currentChatId.value) {
     if (isAgentPanelMaximized.value) agentPanelActiveSectionKey.value = 'main-session'
     return
@@ -1544,7 +1590,7 @@ const openCooperationSession = (sessionId) => {
   agentPanelSections.value = upsertAgentPanelSection(agentPanelSections.value, {
     key,
     type: 'session',
-    title: session?.name || session?.path?.split('/').pop() || '协作会话',
+    title: title || session?.name || session?.path?.split('/').pop() || '协作会话',
     sessionId,
     avatarSeed: sessionId
   })
@@ -1701,12 +1747,22 @@ const getThreadOngoingMessages = (threadId) => {
 
 const ongoingRunMessages = computed(() => getThreadOngoingMessages(currentChatId.value))
 
-const cooperationToolView = computed(() => ({
-  sessions: cooperationSessions.value,
-  tasks: collectCooperationTasks(currentThreadMessages.value),
-  openSession: openCooperationSession,
-  openTree: openCooperationTree
-}))
+const cooperationToolView = computed(() => {
+  const sessions = [
+    ...currentThreadMessages.value.flatMap((message) => (message.tool_calls || [])
+      .filter((call) => getToolCallId(call) === 'list_sessions')
+      .flatMap((call) => parseToolCallResult(call)?.sessions || [])),
+    ...props.cooperationMembers,
+    ...cooperationSessions.value
+  ]
+  return {
+    sessions,
+    treeRootSessionId: sessions.find((member) => member.session_id === currentChatId.value)?.tree_root_session_id || currentChatId.value,
+    tasks: collectCooperationTasks(currentThreadMessages.value),
+    openSession: navigateToSession,
+    openTree: openCooperationTree
+  }
+})
 
 const runGroups = computed(() => {
   const state = currentThreadState.value
@@ -2872,6 +2928,7 @@ const buildExportPayload = () => {
 defineExpose({
   getExportPayload: buildExportPayload,
   selectThreadFromRoute,
+  openSessionFromRoute,
   focusPendingAction
 })
 

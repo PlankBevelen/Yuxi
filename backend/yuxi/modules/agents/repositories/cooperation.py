@@ -1,6 +1,7 @@
 """协作树、消息与执行容量的 PostgreSQL 查询。"""
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.orm import defer
 
 from yuxi.modules.agents.models.cooperation import CooperationEvent, CooperationRuntime
 from yuxi.modules.agents.models.inputs import AgentInput, AgentInputReceipt
@@ -20,16 +21,45 @@ class CooperationRepository:
         self.db = db
 
     async def resolve(self, caller: Session, target: str) -> Session | None:
-        """在相同树、用户与 APP 中解析稳定 ID 或完整路径。"""
+        """稳定 ID 在用户与 APP 内寻址，路径只在当前树内解析。"""
         return await self.db.scalar(
             select(Session).where(
-                Session.tree_root_thread_id == caller.tree_root_thread_id,
                 Session.uid == caller.uid,
                 Session.app_id == caller.app_id,
                 Session.status == "active",
-                or_(Session.thread_id == target, Session.cooperation_path == target),
+                or_(
+                    Session.thread_id == target,
+                    and_(Session.tree_root_thread_id == caller.tree_root_thread_id, Session.cooperation_path == target),
+                ),
             )
         )
+
+    async def updates(self, caller: Session, *, targets: list[str], after: int) -> list[CooperationEvent]:
+        """复核等待目标归属后读取可见更新，归档不删除历史更新。"""
+        members = list(
+            await self.db.scalars(
+                select(Session).where(
+                    Session.thread_id.in_(targets),
+                    Session.uid == caller.uid,
+                    Session.app_id == caller.app_id,
+                    Session.status != "deleted",
+                )
+            )
+        )
+        if {member.thread_id for member in members} != set(targets):
+            raise ValueError("目标 Session 不存在或不属于当前用户与 APP 授权范围")
+        query = select(CooperationEvent).where(
+            CooperationEvent.id > after,
+            or_(
+                and_(
+                    CooperationEvent.kind == "turn_status",
+                    CooperationEvent.recipient_thread_id == CooperationEvent.sender_thread_id,
+                ),
+                and_(CooperationEvent.kind != "turn_status", CooperationEvent.recipient_thread_id == caller.thread_id),
+            ),
+            CooperationEvent.sender_thread_id.in_([member.thread_id for member in members]),
+        )
+        return list((await self.db.scalars(query.order_by(CooperationEvent.id).limit(100))).all())
 
     async def has_unfinished_execution(self, caller: Session) -> bool:
         """检查授权整树的执行与清理责任，待消费输入不阻止用户恢复。"""
@@ -53,13 +83,15 @@ class CooperationRepository:
         )
         return bool(await self.db.scalar(select(or_(active_turn, active_run))))
 
-    async def summary(self, caller: Session) -> list:
+    async def summary(self, caller: Session, *, all_sessions: bool = False) -> list:
         """批量读取整树协作状态，不加载 checkpoint 或结果正文。"""
         members = list(
             (
                 await self.db.scalars(
-                    select(Session).where(
-                        Session.tree_root_thread_id == caller.tree_root_thread_id,
+                    select(Session)
+                    .options(defer(Session.config_snapshot), defer(Session.extra_metadata))
+                    .where(
+                        *([] if all_sessions else [Session.tree_root_thread_id == caller.tree_root_thread_id]),
                         Session.uid == caller.uid,
                         Session.app_id == caller.app_id,
                         Session.status != "deleted",
@@ -69,7 +101,13 @@ class CooperationRepository:
         )
         if not members:
             return []
-        members = order_tree_members(members)
+        if all_sessions:
+            trees = {}
+            for member in members:
+                trees.setdefault(member.tree_root_thread_id, []).append(member)
+            members = [member for tree in trees.values() for member in order_tree_members(tree)]
+        else:
+            members = order_tree_members(members)
         ids = [member.thread_id for member in members]
         turns = {
             turn.thread_id: turn
@@ -99,7 +137,7 @@ class CooperationRepository:
         return rows
 
     async def task_rows(self, caller: Session, *, input_ids: list[str] | None = None, turn_id: str | None = None):
-        """按已提交身份读取同树结果，归档成员仍可读取历史。"""
+        """按已提交身份读取授权用户与 APP 的结果，归档成员仍可读取历史。"""
         query = select(Session, AgentInput, AgentTurn, AgentRun, Message).select_from(Session)
         if input_ids is not None:
             query = (
@@ -117,7 +155,6 @@ class CooperationRepository:
             query.outerjoin(AgentRun, AgentRun.id == func.coalesce(AgentTurn.result_run_id, AgentTurn.current_run_id))
             .outerjoin(Message, (Message.id == AgentRun.output_message_id) & (AgentRun.id == AgentTurn.result_run_id))
             .where(
-                Session.tree_root_thread_id == caller.tree_root_thread_id,
                 Session.uid == caller.uid,
                 Session.app_id == caller.app_id,
                 Session.status != "deleted",
@@ -137,19 +174,18 @@ class CooperationRepository:
         turn_id: str | None = None,
         payload: dict | None = None,
     ) -> CooperationEvent:
-        """串行分配树内通知顺序，保证 cursor 不越过未提交事件。"""
-        if (sender.tree_root_thread_id, sender.uid, sender.app_id) != (
-            recipient.tree_root_thread_id,
+        """按用户与 APP 串行发布，跨树 cursor 不越过未提交事件。"""
+        if (sender.uid, sender.app_id) != (
             recipient.uid,
             recipient.app_id,
         ):
-            raise ValueError("协作消息必须处于同一授权树")
+            raise ValueError("协作消息必须处于同一用户与 APP 授权范围")
         await self.db.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": cooperation_lock_key(sender.tree_root_thread_id)},
+            {"key": f"cooperation-events:{sender.uid}:{sender.app_id or ''}"},
         )
         query = select(CooperationEvent).where(
-            CooperationEvent.tree_root_thread_id == sender.tree_root_thread_id,
+            CooperationEvent.sender_thread_id == sender.thread_id,
             CooperationEvent.idempotency_key == key,
         )
         if kind != "message":
@@ -172,7 +208,7 @@ class CooperationRepository:
                 raise ValueError("协作幂等键已用于不同内容")
             return existing
         event = CooperationEvent(
-            tree_root_thread_id=sender.tree_root_thread_id,
+            tree_root_thread_id=recipient.tree_root_thread_id,
             sender_thread_id=sender.thread_id,
             recipient_thread_id=recipient.thread_id,
             source_run_id=run_id,
@@ -193,12 +229,9 @@ class CooperationRepository:
             {"key": f"cooperation-call:{key}"},
         )
         receipt = await self.db.scalar(
-            select(AgentInputReceipt)
-            .join(Session, Session.thread_id == AgentInputReceipt.thread_id)
-            .where(
+            select(AgentInputReceipt).where(
                 AgentInputReceipt.uid == run.uid,
                 AgentInputReceipt.app_id == run.app_id,
-                Session.tree_root_thread_id == run.runtime_scope_id,
                 AgentInputReceipt.idempotency_key == key,
             )
         )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import and_, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.modules.agents.input_messages import deserialize_input_message
@@ -10,6 +10,7 @@ from yuxi.modules.agents.models.attachments import AgentAttachment
 from yuxi.modules.agents.models.inputs import AgentInput
 from yuxi.modules.agents.models.messages import Message
 from yuxi.modules.agents.models.runs import AgentRun
+from yuxi.modules.agents.models.sessions import Session
 from yuxi.modules.agents.models.turns import AgentTurn
 from yuxi.modules.agents.repositories.attachments import AttachmentRepository
 from yuxi.shared.datetime import utc_now
@@ -144,6 +145,37 @@ class AgentInputRepository:
             .group_by(AgentInput.app_id)
         )
         return {app_id: total for app_id, total in rows if app_id}
+
+    async def origins(self, *, thread_id: str, uid: str, app_id: str | None, input_ids: list[str]) -> list:
+        """只返回授权输入及同主体来源会话，原始 metadata 不作为显示身份。"""
+        return list(
+            (
+                await self.db.execute(
+                    select(AgentInput.id, AgentInput.source, AgentInput.api_key_id, AgentRun.id.label("source_run_id"), Session)
+                    .outerjoin(
+                        AgentRun,
+                        and_(
+                            AgentInput.source == "cooperation",
+                            AgentRun.id == AgentInput.origin_metadata["created_by_run_id"].as_string(),
+                            AgentRun.uid == uid,
+                            AgentRun.app_id == app_id,
+                        ),
+                    )
+                    .outerjoin(
+                        Session,
+                        and_(
+                            Session.id == AgentRun.session_record_id,
+                            Session.uid == uid,
+                            Session.app_id == app_id,
+                            Session.status != "deleted",
+                        ),
+                    )
+                    .where(
+                        AgentInput.id.in_(input_ids), AgentInput.thread_id == thread_id, AgentInput.uid == uid, AgentInput.app_id == app_id
+                    )
+                )
+            ).all()
+        )
 
     async def consume(self, *, inputs: list[AgentInput], turn_id: str, run_id: str) -> list[Message]:
         """同一事务固定消费归属、创建消息并绑定附件，失败全部回滚。"""

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
+import { setImmediate } from 'node:timers'
 import { createTestServer } from '../helpers/createTestServer.js'
 let server, createCoordinator
 before(async () => {
@@ -131,4 +132,27 @@ test('旧选择完成同一微任务窗口加入的新路由仍然被执行', as
   await latest
   assert.deepEqual(selections, ['old', 'latest'])
   assert.equal(coordinator.isSyncing(), false)
+})
+
+test('来源成员在根页面选择成功后打开，旧路由的迟到选择不能打开旧成员', async () => {
+  const { coordinator, effects } = setup()
+  let finish
+  const selection = {
+    selectThreadFromRoute: id => id === 'old-root' ? new Promise(resolve => { finish = resolve }) : Promise.resolve(true),
+    openSessionFromRoute: async id => effects.push(`member:${id}`)
+  }
+  const old = coordinator.sync({ ...target('old-root'), memberSessionId: 'old-child' }, selection)
+  await new Promise(resolve => setImmediate(resolve))
+  const current = coordinator.sync({ ...target('new-root'), memberSessionId: 'new-child' }, selection)
+  finish(true)
+  await Promise.all([old, current])
+  assert.deepEqual(effects, ['member:new-child'])
+})
+
+test('成员 query 移除时恢复根主会话，防止保活页面停留在最大化成员', async () => {
+  const { coordinator, effects } = setup()
+  const selection = { selectThreadFromRoute: async () => true, openSessionFromRoute: async id => effects.push(id) }
+  await coordinator.sync({ ...target('root'), memberSessionId: 'child' }, selection)
+  await coordinator.sync({ ...target('root'), memberSessionId: '' }, selection)
+  assert.deepEqual(effects, ['child', ''])
 })

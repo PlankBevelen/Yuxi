@@ -62,6 +62,49 @@ def capacity_calls(messages, results):
     return []
 
 
+def user_scope_calls(messages, results):
+    """独立顶层任务与派发方通过稳定 ID 通信、追加与等待。"""
+    users = " ".join(str(message["content"]) for message in messages if message["role"] == "user")
+    if "USER_SCOPE_CHILD" in users:
+        assert "PRIVATE_ROOT_HISTORY" not in users
+        if "USER_SCOPE_WRITE" in users and "user-write" not in results:
+            return [
+                (
+                    "user-write",
+                    "execute",
+                    {
+                        "command": "python3 -c \"from pathlib import Path; Path('cooperation-target-only.txt').write_text('TARGET_PROJECT_VERIFIED'); print(Path.cwd())\""
+                    },
+                )
+            ]
+        return []
+    if "user-create" not in results:
+        existing = re.search(r"USER_SCOPE_EXISTING:([0-9a-f-]+)", users)
+        if existing:
+            return [("user-create", "submit_input", {"target": existing.group(1), "description": "USER_SCOPE_CHILD USER_SCOPE_WRITE"})]
+        return [("user-create", "create_session", {"name": "independent", "description": "USER_SCOPE_CHILD", "mode": "root"})]
+    target = json.loads(results["user-create"])
+    if "user-wait" not in results:
+        return [("user-wait", "wait_inputs", {"input_ids": [target["input_id"]], "timeout_seconds": 60})]
+    assert json.loads(results["user-wait"])["results"][0]["output"] == OUTPUT
+    if "user-submit" not in results:
+        return [
+            ("user-message", "send_message", {"target": target["session_id"], "content": "CROSS_TREE_MESSAGE"}),
+            ("user-submit", "submit_input", {"target": target["session_id"], "description": "USER_SCOPE_CHILD FOLLOWUP"}),
+            ("user-list", "list_sessions", {}),
+        ]
+    if "user-followup-wait" not in results:
+        followup = json.loads(results["user-submit"])
+        return [("user-followup-wait", "wait_inputs", {"input_ids": [followup["input_id"]], "timeout_seconds": 60})]
+    if "user-updates" not in results:
+        return [("user-updates", "wait_sessions", {"targets": [target["session_id"]], "timeout_seconds": 60})]
+    if "user-exact" not in results:
+        return [("user-exact", "get_result", {"input_id": target["input_id"]})]
+    assert json.loads(results["user-exact"])["output"] == OUTPUT
+    assert target["session_id"] in {member["session_id"] for member in json.loads(results["user-list"])["sessions"]}
+    return []
+
+
 def depth_calls(messages, results):
     """按真实工具回执推进三层派发，第三层必须被执行边界拒绝。"""
     users = " ".join(str(message["content"]) for message in messages if message["role"] == "user")
@@ -192,7 +235,9 @@ class CooperationReplayHandler(BaseHTTPRequestHandler):
         results = {m.get("tool_call_id"): m.get("content") for m in messages if m["role"] == "tool"}
         calls = []
         completion = OUTPUT
-        if "COOP_PARALLEL_WAIT_" in serialized:
+        if "USER_SCOPE_" in serialized:
+            calls = user_scope_calls(messages, results)
+        elif "COOP_PARALLEL_WAIT_" in serialized:
             calls, completion = parallel_wait_completion(messages, results)
         elif "COOP_DEPTH:" in serialized:
             calls = depth_calls(messages, results)

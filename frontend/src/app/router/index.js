@@ -8,6 +8,7 @@ const AppLayout = () => import('@/app/layouts/AppLayout.vue')
 
 /** 将会话身份绑定到路由实例，保活页面不读取其他会话的路由参数。 */
 const sessionRouteProps = (route) => ({
+  memberSessionId: typeof route.query.member_session_id === 'string' ? route.query.member_session_id : '',
   threadId: typeof route.params.thread_id === 'string' ? route.params.thread_id : '',
   agentId: typeof route.query.agent_id === 'string' ? route.query.agent_id : '',
   projectId: typeof route.query.project_id === 'string' ? route.query.project_id : ''

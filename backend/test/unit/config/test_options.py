@@ -177,7 +177,7 @@ async def _async_value(value):
 
 
 def test_cooperation_depth_defaults_to_two_and_preserves_zero():
-    """整数配置的零值用于禁止新增协作，不可被默认值覆盖。"""
+    """整数配置的零值用于禁止新增子会话，不可被默认值覆盖。"""
     assert system_options.resolve({})["max_cooperation_depth"] == 2
     assert system_options.resolve({"max_cooperation_depth": 0})["max_cooperation_depth"] == 0
 
