@@ -1,14 +1,41 @@
-"""提及文件搜索路由。"""
+"""提及文件与对话标题搜索路由。"""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.api.dependencies.auth import get_db, get_required_user
-from yuxi.modules.agents.services.mentions import InvalidMentionThreadError, MentionThreadNotFoundError, search_mentions
+from yuxi.modules.agents.scope import ActorScope
+from yuxi.modules.agents.services.mentions import (
+    InvalidMentionThreadError,
+    MentionThreadNotFoundError,
+    search_mentions,
+    search_session_mentions,
+)
 from yuxi.modules.identity.models import User
 
 mention_router = APIRouter(prefix="/mention", tags=["mention"])
+
+
+class MentionSessionItem(BaseModel):
+    """对话引用的身份、标题与活动时间。"""
+
+    thread_id: str
+    title: str | None
+    updated_at: str | None
+
+
+@mention_router.get("/sessions", response_model=list[MentionSessionItem])
+async def search_mention_sessions(
+    request: Request,
+    query: str = Query("", max_length=256, description="仅匹配对话标题；为空时返回最近对话"),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """搜索当前 Web 用户的对话标题，不返回消息正文。"""
+    if getattr(request.state, "api_key", None) is not None:
+        raise HTTPException(status_code=403, detail="对话引用仅支持 Web 登录用户")
+    return await search_session_mentions(db=db, scope=ActorScope(uid=current_user.uid, app_id=None), query=query)
 
 
 class MentionFileItem(BaseModel):

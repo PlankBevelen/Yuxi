@@ -19,6 +19,19 @@ after(async () => {
   await server?.close()
 })
 
+test('对话引用持久保存 ID 和带引号的标题，同名对话仍可区分并整体删除', () => {
+  const { formatMentionToken, parseMentionText, getMentionDisplayLabel, expandMentionDeletionRange } = mentionUtils
+  const title = '方案 "A" \\ 设计'
+  const raw = formatMentionToken('session', `session-one ${title}`)
+  const [segment] = parseMentionText(raw)
+  assert.equal(segment.type, 'session')
+  assert.equal(segment.value, `session-one ${title}`)
+  assert.equal(getMentionDisplayLabel(segment.type, segment.value), title)
+  assert.notEqual(raw, formatMentionToken('session', `session-two ${title}`))
+  assert.equal(getMentionDisplayLabel('session', 'session-one'), '未命名对话')
+  assert.deepEqual(expandMentionDeletionRange(`${raw} 后文`, raw.length, raw.length), { start: 0, end: raw.length })
+})
+
 test('删除无空格相邻正文前的 mention 时使用 chip 边界', () => {
   const { expandMentionDeletionRange, parseMentionText } = mentionUtils
   const text = '@knowledge:示例知识库这个知识库有什么作用'

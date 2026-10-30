@@ -61,6 +61,37 @@
           </button>
         </div>
         <!-- 文件列表 -->
+        <div class="mention-group session-mention-group">
+          <div class="mention-group-title">
+            对话 <span class="session-search-hint">{{ mentionQuery ? '仅搜索标题' : '最近对话 · 输入标题搜索' }}</span>
+          </div>
+          <div v-if="sessionSearchLoading" class="mention-search-placeholder" role="status">正在查找对话…</div>
+          <div v-else-if="sessionSearchError" class="session-search-error" role="status">
+            对话加载失败
+            <button type="button" @click.stop="updateMentionItems(mentionQuery)">重试</button>
+          </div>
+          <div v-else-if="!mentionItems.sessions.length" class="mention-search-placeholder">
+            {{ mentionQuery ? '未找到标题匹配的对话，试试其他关键词' : '暂无可引用的对话' }}
+          </div>
+          <button
+            v-for="(item, index) in mentionItems.sessions"
+            :key="item.value"
+            type="button"
+            :class="['mention-item', 'session-mention-item', { active: isItemSelected('session', index) }]"
+            :title="item.label"
+            @click="insertMention(item)"
+          >
+            <MessageCircle :size="16" aria-hidden="true" />
+            <span class="session-mention-title">
+              <span
+                v-for="(part, pIdx) in splitTextByQuery(item.label, mentionQuery)"
+                :key="pIdx"
+                :class="{ 'query-match': part.isMatch }"
+              >{{ part.text }}</span>
+            </span>
+            <time v-if="item.updatedAt" class="session-mention-date">{{ item.updatedAt }}</time>
+          </button>
+        </div>
         <div v-if="mentionItems.files.length > 0 || showFileSearchPrompt" class="mention-group">
           <div class="mention-group-title">文件</div>
           <div v-if="showFileSearchPrompt" class="mention-search-placeholder">
@@ -256,8 +287,6 @@
           </div>
         </div>
 
-        <!-- 无结果 -->
-        <div v-if="!hasAnyItems" class="mention-empty">暂无可引用的项</div>
       </div>
     </div>
 
@@ -303,9 +332,10 @@ import {
   Plus,
   Paperclip,
   ImagePlus,
+  MessageCircle,
   Send as SendOutlined
 } from '@lucide/vue'
-import { searchMentionFiles } from '@/apis/mention_api'
+import { searchMentionFiles, searchMentionSessions } from '@/apis/mention_api'
 import FileTypeIcon from '@/shared/ui/FileTypeIcon.vue'
 import ActionTrigger from '@/shared/ui/ActionTrigger.vue'
 import MentionToken from '@/modules/session/ui/MentionToken.vue'
@@ -574,7 +604,9 @@ const createEditorMentionElement = (segment) => {
   token.dataset.mentionType = segment.type
   token.dataset.mentionValue = segment.value
   token.dataset.vueMention = 'true'
-  token.title = segment.raw
+  token.title = segment.type === 'session'
+    ? getMentionDisplayLabel(segment.type, segment.value, mentionDisplayLabels.value)
+    : segment.raw
   renderEditorMention(token)
   editorMentions.add(token)
   return token
@@ -766,22 +798,15 @@ const checkMentionTrigger = () => {
 // 更新提及候选项
 const updateMentionItems = (query = '') => {
   const normalizedQuery = String(query || '')
-  if (!normalizedQuery) {
-    clearTimeout(mentionSearchTimer)
-    if (activeAbortController) {
-      activeAbortController.abort()
-      activeAbortController = null
-    }
-    searchRequestId.value++
-  }
-
-  if (!props.mention) {
-    mentionItems.value = { files: [], knowledgeBases: [], mcps: [], skills: [], agents: [] }
-    return
-  }
+  clearTimeout(mentionSearchTimer)
+  activeAbortController?.abort()
+  activeAbortController = null
+  const currentId = ++searchRequestId.value
+  sessionSearchLoading.value = true
+  sessionSearchError.value = false
 
   const lowerQuery = normalizedQuery.toLowerCase()
-  const { files = [] } = props.mention
+  const { files = [] } = props.mention || {}
 
   const filterItems = (list) =>
     list.filter((item) => {
@@ -825,6 +850,7 @@ const updateMentionItems = (query = '') => {
 
   // 初始化设置 mentionItems 状态（使用前端已有的本地过滤结果，瞬间更新，达到零卡顿）
   mentionItems.value = {
+    sessions: [],
     files: filteredLocalFiles,
     knowledgeBases: filterItems(knowledgeItems),
     mcps: filterItems(mcpItems),
@@ -832,73 +858,70 @@ const updateMentionItems = (query = '') => {
     agents: filterItems(agentItems)
   }
 
-  if (normalizedQuery) {
-    const activeThreadId = props.threadId || ''
-    clearTimeout(mentionSearchTimer)
-    if (activeAbortController) {
-      activeAbortController.abort()
-      activeAbortController = null
-    }
-    searchRequestId.value++
-    const currentId = searchRequestId.value
+  const activeThreadId = props.threadId || ''
+  mentionSearchTimer = setTimeout(async () => {
+    activeAbortController = new AbortController()
+    const signal = activeAbortController.signal
+    const sessionSearch = searchMentionSessions(normalizedQuery, signal)
+      .then((sessions) => {
+        if (currentId !== searchRequestId.value) return
+        const selected = mentionSelectableItems.value[mentionSelectedIndex.value]
+        mentionItems.value.sessions = sessions
+          .filter((session) => session.thread_id !== activeThreadId)
+          .map((session) => ({
+            type: 'session',
+            value: session.thread_id,
+            label: session.title || '未命名对话',
+            insertValue: `${session.thread_id} ${session.title || '未命名对话'}`,
+            updatedAt: session.updated_at
+              ? new Date(session.updated_at).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+              : ''
+          }))
+        const selectedIndex = mentionSelectableItems.value.indexOf(selected)
+        if (selectedIndex >= 0) mentionSelectedIndex.value = selectedIndex
+      })
+      .catch((error) => {
+        if (currentId === searchRequestId.value && error.name !== 'AbortError') {
+          sessionSearchError.value = true
+        }
+      })
+      .finally(() => {
+        if (currentId === searchRequestId.value) sessionSearchLoading.value = false
+      })
 
-    mentionSearchTimer = setTimeout(async () => {
-      activeAbortController = new AbortController()
-
-      try {
-        const responseData = await searchMentionFiles(
-          activeThreadId,
-          normalizedQuery,
-          activeAbortController.signal
-        )
-
-        // 竞态校验锁，确保是当前最新响应
-        if (currentId === searchRequestId.value && Array.isArray(responseData)) {
-          const remoteFileItems = responseData.map((f) => {
-            const path = f.path || ''
-            const fileName = f.name || path.split('/').pop() || path
-            return {
+    const fileSearch = normalizedQuery
+      ? searchMentionFiles(activeThreadId, normalizedQuery, signal).then((files) => {
+          if (currentId !== searchRequestId.value) return
+          const selected = mentionSelectableItems.value[mentionSelectedIndex.value]
+          const seenValues = new Set(filteredLocalFiles.map((item) => item.value))
+          for (const file of files) {
+            const path = file.path || ''
+            if (seenValues.has(path)) continue
+            seenValues.add(path)
+            mentionItems.value.files.push({
               value: path,
-              label: fileName,
+              label: file.name || path.split('/').pop() || path,
               type: 'file',
-              insertValue: path || fileName,
-              tokenLabel: formatMentionToken('file', fileName),
+              insertValue: path,
               description: path,
-              is_dir: f.is_dir,
-              source: f.source
-            }
-          })
-
-          // 合并本地临时文件与后端高匹配度文件（使用 Set 进行去重，防止重复展示）
-          const seenValues = new Set(filteredLocalFiles.map((x) => x.value))
-          const mergedFiles = [...filteredLocalFiles]
-
-          remoteFileItems.forEach((item) => {
-            if (!seenValues.has(item.value)) {
-              seenValues.add(item.value)
-              mergedFiles.push(item)
-            }
-          })
-
-          mentionItems.value.files = mergedFiles
-        }
-      } catch (error) {
-        // 主动取消的请求我们不作为错误抛出
-        if (error.name !== 'AbortError') {
-          console.error('Mention search error:', error)
-        }
-      } finally {
-        if (currentId === searchRequestId.value) {
-          activeAbortController = null
-        }
-      }
-    }, 250) // 250ms 经典防抖时间
-  }
+              is_dir: file.is_dir,
+              source: file.source
+            })
+          }
+          const selectedIndex = mentionSelectableItems.value.indexOf(selected)
+          if (selectedIndex >= 0) mentionSelectedIndex.value = selectedIndex
+        })
+      : Promise.resolve()
+    await Promise.allSettled([sessionSearch, fileSearch])
+    if (currentId === searchRequestId.value) activeAbortController = null
+  }, 250)
 }
 
 // 检查项是否被选中
 const isItemSelected = (type, index) => {
-  const selectedIndex = mentionSelectedIndex.value - addActions.value.length
+  const resourceIndex = mentionSelectedIndex.value - addActions.value.length
+  if (type === 'session') return resourceIndex === index
+  const selectedIndex = resourceIndex - mentionItems.value.sessions.length
   if (selectedIndex < 0) return false
 
   const filesLen = mentionItems.value.files.length
@@ -923,19 +946,6 @@ const isItemSelected = (type, index) => {
 // 是否有任何候选项
 const showFileSearchPrompt = computed(() => {
   return Boolean(props.mention?.files?.length) && !mentionQuery.value
-})
-
-const hasAnyItems = computed(() => {
-  const items = mentionItems.value
-  return (
-    addActions.value.length > 0 ||
-    showFileSearchPrompt.value ||
-    items.files.length > 0 ||
-    items.knowledgeBases.length > 0 ||
-    items.mcps.length > 0 ||
-    items.skills.length > 0 ||
-    items.agents.length > 0
-  )
 })
 
 const commitMention = (item, range = null) => {
@@ -995,6 +1005,16 @@ const scrollToItem = (index) => {
   })
 }
 
+const mentionSelectableItems = computed(() => [
+  ...addActions.value,
+  ...mentionItems.value.sessions,
+  ...mentionItems.value.files,
+  ...mentionItems.value.knowledgeBases,
+  ...mentionItems.value.mcps,
+  ...mentionItems.value.skills,
+  ...mentionItems.value.agents
+])
+
 // 处理键盘导航
 const handleMentionNavigation = (e) => {
   if (!mentionPopupVisible.value) return
@@ -1004,14 +1024,7 @@ const handleMentionNavigation = (e) => {
     return
   }
 
-  const allItems = [
-    ...addActions.value,
-    ...mentionItems.value.files,
-    ...mentionItems.value.knowledgeBases,
-    ...mentionItems.value.mcps,
-    ...mentionItems.value.skills,
-    ...mentionItems.value.agents
-  ]
+  const allItems = mentionSelectableItems.value
 
   const total = allItems.length
   if (total === 0) return
@@ -1268,7 +1281,9 @@ const handleSendOrStop = () => {
 // @ 提及功能状态
 const mentionPopupVisible = ref(false)
 const mentionQuery = ref('')
-const mentionItems = ref({ files: [], knowledgeBases: [], mcps: [], skills: [], agents: [] })
+const mentionItems = ref({ sessions: [], files: [], knowledgeBases: [], mcps: [], skills: [], agents: [] })
+const sessionSearchLoading = ref(false)
+const sessionSearchError = ref(false)
 const mentionSelectedIndex = ref(0)
 const searchRequestId = ref(0)
 const isComposing = ref(false)
@@ -1623,6 +1638,59 @@ defineExpose({
   border: 1px solid var(--gray-200);
   padding: 8px 0;
 
+  .session-search-hint {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 400;
+  }
+
+  .session-search-error {
+    padding: 8px 12px;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+
+    button {
+      margin-left: 8px;
+      border: 0;
+      background: transparent;
+      color: var(--main-700);
+      cursor: pointer;
+    }
+  }
+
+  .session-mention-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: calc(100% - 8px);
+    min-height: 36px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font-family: inherit;
+
+    svg { flex-shrink: 0; }
+
+    &:focus-visible {
+      outline: 2px solid var(--main-500);
+      outline-offset: -2px;
+    }
+  }
+
+  .session-mention-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-mention-date {
+    flex-shrink: 0;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+  }
+
   .mention-group {
     margin-bottom: 4px;
 
@@ -1780,13 +1848,6 @@ defineExpose({
   .query-match {
     color: var(--color-warning-700);
     font-weight: 700;
-  }
-
-  .mention-empty {
-    text-align: center;
-    padding: 12px 8px;
-    color: var(--gray-400);
-    font-size: 13px;
   }
 
   .mention-search-placeholder {

@@ -13,7 +13,7 @@
         :data-mention-raw="editable ? segment.raw : undefined"
         :data-mention-type="editable ? segment.type : undefined"
         :data-mention-value="editable ? segment.value : undefined"
-        :title="segment.raw"
+        :title="segment.type === 'session' ? getTokenLabel(segment) : segment.raw"
       />
     </template>
   </span>

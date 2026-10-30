@@ -99,6 +99,10 @@ export const getMentionDisplayLabel = (type, value, displayLabels = {}) => {
   const mappedLabel = displayLabels[`${type}:${value}`]
   if (mappedLabel) return mappedLabel
 
+  if (type === 'session') {
+    return String(value ?? '').split(' ').slice(1).join(' ').trim() || '未命名对话'
+  }
+
   if (type === 'file') {
     const normalizedPath = String(value ?? '').replace(/\/+$/, '')
     return getDisplayFileName(normalizedPath || value, '文件')

@@ -230,10 +230,11 @@ class SessionRepository:
         limit: int = 20,
         offset: int = 0,
         app_id: str | None | object = ALL_APP_SCOPES,
+        title_only: bool = False,
     ) -> tuple[list[dict], bool]:
-        """联合匹配当前作用域的标题与可见消息，片段只来自实际命中消息。"""
+        """搜索当前作用域的标题，可选联合可见消息并返回实际命中片段。"""
         normalized_query = str(query or "").strip()
-        if not normalized_query:
+        if not normalized_query and not title_only:
             return [], False
 
         session_conditions = [
@@ -247,6 +248,19 @@ class SessionRepository:
 
         escaped_title_query = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         title_pattern = f"%{escaped_title_query}%"
+        if title_only:
+            if normalized_query:
+                session_conditions.append(Session.title.ilike(title_pattern, escape="\\"))
+            result = await self.db.scalars(
+                select(Session)
+                .where(*session_conditions)
+                .order_by(Session.updated_at.desc(), Session.id.desc())
+                .limit(limit + 1)
+                .offset(offset)
+            )
+            sessions = list(result)
+            return [{"agent_session": session} for session in sessions[:limit]], len(sessions) > limit
+
         message_conditions = message_search_conditions(normalized_query)
         summary = (
             select(

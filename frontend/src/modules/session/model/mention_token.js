@@ -3,7 +3,8 @@ export const mentionTypePrefixMap = {
   knowledge: 'knowledge',
   mcp: 'mcp',
   skill: 'skill',
-  agent: 'agent'
+  agent: 'agent',
+  session: 'session'
 }
 
 export const formatMentionToken = (type, value) => {

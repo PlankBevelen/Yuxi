@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from yuxi.modules.agents.repositories.sessions import SessionRepository
+from yuxi.modules.agents.scope import ActorScope
 from yuxi.modules.workspace.filesystem import Workspace
 from yuxi.modules.workspace.paths import validate_thread_id
 from yuxi.modules.workspace.runtime_paths import runtime_path_for_workdir_scope, runtime_workspace_path
 from yuxi.modules.workspace.services.bindings import resolve_authorized_workdir
+from yuxi.shared.datetime import format_utc_datetime
 
 MENTION_EXCLUDE_DIRS = frozenset(
     {
@@ -27,6 +29,19 @@ MENTION_EXCLUDE_DIRS = frozenset(
 )
 MAX_MENTION_RESULTS = 50
 MAX_MENTION_CANDIDATES = 500
+
+
+async def search_session_mentions(*, db, scope: ActorScope, query: str) -> list[dict]:
+    """仅按标题列出当前用户与 APP 可见的最近对话。"""
+    rows, _ = await SessionRepository(db).search_sessions(uid=scope.uid, app_id=scope.app_id, query=query, limit=10, title_only=True)
+    return [
+        {
+            "thread_id": row["agent_session"].thread_id,
+            "title": row["agent_session"].title,
+            "updated_at": format_utc_datetime(row["agent_session"].updated_at),
+        }
+        for row in rows
+    ]
 
 
 class MentionThreadNotFoundError(LookupError):
