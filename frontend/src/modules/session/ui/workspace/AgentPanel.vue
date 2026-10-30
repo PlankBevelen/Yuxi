@@ -32,7 +32,7 @@
               :src="section.avatar"
               :name="section.title"
               :seed="section.avatarSeed"
-              kind="agent"
+              kind="session"
               :size="18"
               shape="rounded"
             />

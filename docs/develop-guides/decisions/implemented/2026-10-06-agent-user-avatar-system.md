@@ -4,6 +4,8 @@
 类型：feature
 Owner：frontend/src/shared/ui/FallbackAvatar.vue
 
+默认风格、会话身份与人物背景策略由[按实体区分头像](2026-10-31-avatar-entity-styles.md)取代；本记录保留本地生成、自定义图片优先与错误恢复的决定。
+
 ## 问题
 
 Agent 与 User 的默认头像需要共享风格、完整色卡、明暗版本和图标备用语义，并在列表、选择器、账户、统计及子智能体面板中保持实体身份一致。外部默认头像 API 会使头像展示依赖网络。

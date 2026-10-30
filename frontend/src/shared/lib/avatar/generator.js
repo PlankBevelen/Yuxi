@@ -3,15 +3,16 @@ import glyphs from '@dicebear/styles/glyphs.json' with { type: 'json' }
 import clay from '@dicebear/styles/clay.json' with { type: 'json' }
 import shapeGrid from '@dicebear/styles/shape-grid.json' with { type: 'json' }
 import gaze from '@dicebear/styles/gaze.json' with { type: 'json' }
+import lorelei from '@dicebear/styles/lorelei.json' with { type: 'json' }
+import notionists from '@dicebear/styles/notionists.json' with { type: 'json' }
 import { presets, paletteOptions } from './presets.js'
 
-export const defaultStyles = { user: 'glyphs', agent: 'clay' }
+export const defaultStyles = { user: 'notionists', agent: 'lorelei', session: 'gaze' }
 
 const definitions = new Map(
-  Object.entries({ glyphs, clay, 'shape-grid': shapeGrid, gaze }).map(([name, definition]) => [
-    name,
-    new Style(definition)
-  ])
+  Object.entries({ glyphs, clay, 'shape-grid': shapeGrid, gaze, lorelei, notionists }).map(
+    ([name, definition]) => [name, new Style(definition)]
+  )
 )
 
 // 只开放 Glyphs 的底纸颜色；蒙版与所有几何保持上游定义。

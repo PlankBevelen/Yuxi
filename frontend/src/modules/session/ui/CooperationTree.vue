@@ -68,7 +68,7 @@
             <FallbackAvatar
               :name="item.name"
               :seed="item.session.session_id"
-              kind="agent"
+              kind="session"
               :size="18"
               shape="rounded"
               decorative

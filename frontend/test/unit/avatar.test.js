@@ -34,8 +34,8 @@ function geometry(svg) {
   )
 }
 
-test('四种风格默认输出保留原作，色卡与夜间只改变颜色', () => {
-  for (const style of ['glyphs', 'clay', 'shape-grid', 'gaze']) {
+test('支持的风格保留原作几何，色卡与夜间只改变颜色', () => {
+  for (const style of ['glyphs', 'clay', 'shape-grid', 'gaze', 'lorelei', 'notionists']) {
     const definition = JSON.parse(
       readFileSync(
         new URL(`../../node_modules/@dicebear/styles/src/${style}.json`, import.meta.url)
@@ -47,7 +47,10 @@ test('四种风格默认输出保留原作，色卡与夜间只改变颜色', ()
         seed: 'user:42',
         size: 256,
         borderRadius,
-        idRandomization: false
+        idRandomization: false,
+        ...(['lorelei', 'notionists'].includes(style)
+          ? { backgroundColor: ['b6e3f4', 'c0aede', 'd1d4f9', 'ffd5dc', 'ffdfbf'] }
+          : {})
       }).toString()
       assert.equal(generate({ style, seed: 'user:42', shape, dark: 'off' }), native)
       for (const seed of ['user:001', 'agent:research', 'mcp:filesystem']) {
@@ -71,7 +74,7 @@ test('四种风格默认输出保留原作，色卡与夜间只改变颜色', ()
 })
 
 test('身份稳定、支持自动主题、未知参数明确拒绝、配置返回值独立', () => {
-  assert.deepEqual(defaultStyles, { user: 'glyphs', agent: 'clay' })
+  assert.deepEqual(defaultStyles, { user: 'notionists', agent: 'lorelei', session: 'gaze' })
   assert.equal(
     generate({ style: 'gaze', seed: 'agent:42' }),
     generate({ style: 'gaze', seed: 'agent:42' })
@@ -118,18 +121,62 @@ test('深浅色保留同一身份的主体填色，官方原色使用各风格�
     assert.deepEqual(preset.dark.body, preset.light.body, `${name} 主体色板`)
   }
   for (const style of ['glyphs', 'clay', 'shape-grid', 'gaze']) {
-    const native = JSON.parse(readFileSync(
-      new URL(`../../node_modules/@dicebear/styles/src/${style}.json`, import.meta.url)
-    ))
-    const channel = { glyphs: 'glyph', clay: 'body', 'shape-grid': 'background', gaze: 'body' }[style]
+    const native = JSON.parse(
+      readFileSync(
+        new URL(`../../node_modules/@dicebear/styles/src/${style}.json`, import.meta.url)
+      )
+    )
+    const channel = { glyphs: 'glyph', clay: 'body', 'shape-grid': 'background', gaze: 'body' }[
+      style
+    ]
     for (const preset of Object.keys(presets)) {
-      const body = preset === 'default' ? native.colors[channel].values : presets[preset].light.body.map(color => `#${color}`)
+      const body =
+        preset === 'default'
+          ? native.colors[channel].values
+          : presets[preset].light.body.map((color) => `#${color}`)
       for (const seed of ['user:42', 'agent:research', 'mcp:filesystem']) {
-        const fills = dark => [...generate({ style, preset, seed, dark }).matchAll(/fill="([^"]+)"/g)]
-          .map(match => match[1]).filter(color => body.includes(color))
+        const fills = (dark) =>
+          [...generate({ style, preset, seed, dark }).matchAll(/fill="([^"]+)"/g)]
+            .map((match) => match[1])
+            .filter((color) => body.includes(color))
         const light = fills('off')
         assert.ok(light.length > 0, `${style}/${preset} 缺少主体填色`)
         assert.deepEqual(fills('on'), light, `${style}/${preset}/${seed} 主体填色改变`)
+      }
+    }
+  }
+})
+
+test('人物头像使用预设背景，在深浅主题下完全一致并保留署名', () => {
+  for (const preset of Object.keys(presets)) {
+    const options = resolvePreset('notionists', preset)
+    assert.ok(options.backgroundColor.length > 1, `${preset} 缺少背景色组`)
+    assert.deepEqual(options.backgroundColor, presets[preset].light.background)
+    for (const style of ['notionists', 'lorelei']) {
+      assert.deepEqual(resolvePreset(style, preset).backgroundColor, options.backgroundColor)
+      assert.deepEqual(resolvePreset(style, preset, true), resolvePreset(style, preset, false))
+      for (const seed of ['user:42', 'agent:research', 'user:0']) {
+        const light = generate({ style, preset, seed, dark: 'off' })
+        assert.equal(generate({ style, preset, seed, dark: 'auto' }, true), light)
+        assert.ok(options.backgroundColor.some((color) => light.includes(`fill="#${color}"`)))
+        if (style === 'notionists') {
+          assert.match(light, /Zoish/)
+        } else {
+          const definition = JSON.parse(
+            readFileSync(
+              new URL('../../node_modules/@dicebear/styles/src/lorelei.json', import.meta.url)
+            )
+          )
+          const native = new Avatar(new Style(definition), {
+            seed,
+            size: 256,
+            borderRadius: 50,
+            idRandomization: false,
+            backgroundColor: options.backgroundColor
+          }).toString()
+          assert.equal(light, native, `${preset} 改变了 Lorelei 的原作人物颜色`)
+          assert.match(light, /Lisa Wischofsky/)
+        }
       }
     }
   }

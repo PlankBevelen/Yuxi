@@ -30,7 +30,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Bot, User } from '@lucide/vue'
+import { Bot, User, Workflow } from '@lucide/vue'
 import { useThemeStore } from '@/shared/model/theme'
 import { defaultStyles, generate, imageUrl } from '@/shared/lib/avatar/generator'
 
@@ -38,9 +38,13 @@ const props = defineProps({
   src: { type: String, default: '' },
   name: { type: String, default: '' },
   seed: { type: [String, Number], default: '' },
-  kind: { type: String, default: 'user', validator: (value) => ['user', 'agent'].includes(value) },
+  kind: {
+    type: String,
+    default: 'user',
+    validator: (value) => ['user', 'agent', 'session'].includes(value)
+  },
   style: { type: String, default: '' },
-  preset: { type: String, default: 'default' },
+  preset: { type: String, default: '' },
   dark: { type: String, default: 'auto' },
   size: { type: [String, Number], default: 32 },
   shape: {
@@ -65,7 +69,7 @@ const source = computed(() => {
         generate(
           {
             style: props.style || defaultStyles[props.kind],
-            preset: props.preset,
+            preset: props.preset || (props.kind === 'agent' ? 'soft' : 'default'),
             dark: props.dark,
             shape: props.shape,
             seed: `${props.kind}:${String(props.seed ?? '').trim() || String(props.name || '').trim() || 'default'}`
@@ -79,14 +83,17 @@ const source = computed(() => {
   }
 })
 const isFallback = computed(() => failed.value || !!source.value.error)
-const fallbackIcon = computed(() => (props.kind === 'agent' ? Bot : User))
+const fallbackIcon = computed(() => ({ agent: Bot, user: User, session: Workflow })[props.kind])
 const resolvedAlt = computed(
-  () => props.alt || props.name || (props.kind === 'agent' ? '智能体头像' : '用户头像')
+  () =>
+    props.alt ||
+    props.name ||
+    { agent: '智能体头像', user: '用户头像', session: '会话图标' }[props.kind]
 )
 const avatarStyle = computed(() => ({
   '--fallback-avatar-size': typeof props.size === 'number' ? `${props.size}px` : props.size,
-  '--fallback-avatar-background': `var(--avatar-${props.kind}-background)`,
-  '--fallback-avatar-ink': `var(--avatar-${props.kind}-ink)`
+  '--fallback-avatar-background': `var(--avatar-${props.kind === 'user' ? 'user' : 'agent'}-background)`,
+  '--fallback-avatar-ink': `var(--avatar-${props.kind === 'user' ? 'user' : 'agent'}-ink)`
 }))
 
 /** 仅处理当前图片的失败，迟到的旧请求不覆盖新来源。 */

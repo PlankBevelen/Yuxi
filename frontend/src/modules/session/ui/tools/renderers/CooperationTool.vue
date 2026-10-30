@@ -17,7 +17,7 @@
               :title="target.name || '会话信息尚未返回'"
               @click="target.sessionId && cooperationView.openSession(target.sessionId)"
             >
-              <FallbackAvatar v-if="target.sessionId" :name="target.name" :seed="target.sessionId" kind="agent" :size="18" shape="rounded" decorative />
+              <FallbackAvatar v-if="target.sessionId" :name="target.name" :seed="target.sessionId" kind="session" :size="18" shape="rounded" decorative />
               <span>{{ target.name || '会话' }}</span>
             </component>
           </template>
@@ -30,7 +30,7 @@
     </div>
     <div v-if="isList && expanded" class="event-session-list">
       <button v-for="target in targets" :key="target.sessionId" type="button" class="event-target" @click="cooperationView.openSession(target.sessionId)">
-        <FallbackAvatar :name="target.name" :seed="target.sessionId" kind="agent" :size="18" shape="rounded" decorative />
+        <FallbackAvatar :name="target.name" :seed="target.sessionId" kind="session" :size="18" shape="rounded" decorative />
         <span>{{ target.name || '会话' }}</span>
         <ChevronRight :size="13" aria-hidden="true" />
       </button>

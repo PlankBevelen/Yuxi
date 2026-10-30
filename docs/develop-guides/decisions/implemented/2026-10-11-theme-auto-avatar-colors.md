@@ -4,6 +4,8 @@
 类型：feature
 Owner：frontend/src/shared/model/theme.js
 
+Lorelei 与 Notionists 的主题配色遵循[按实体区分头像](2026-10-31-avatar-entity-styles.md)，主题轮换与其他风格配色沿用本记录。
+
 ## 问题
 
 用户需要在浅色、深色、跟随浏览器之间连续切换，同时保持头像的主体配色。二态主题与点击即关闭的菜单无法完成这个操作；夜间统一套用另一组颜色会让官方原色的不同风格与同一身份明显变色。
