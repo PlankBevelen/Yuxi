@@ -8,6 +8,7 @@ import ActionTrigger from '@/shared/ui/ActionTrigger.vue'
 import ModelSelectorComponent from '@/modules/agents/ui/ModelSelectorComponent.vue'
 import ProjectSelectionSection from '@/modules/projects/ui/ProjectSelectionSection.vue'
 import ToolApprovalModeSelector from '@/modules/session/ui/ToolApprovalModeSelector.vue'
+import { DEFAULT_TOOL_APPROVAL_MODE } from '@/modules/session'
 import { AUTO_PROJECT_ID } from '@/modules/projects'
 import {
   applyFrequencyChange,
@@ -53,7 +54,7 @@ function initialForm(job) {
       schedule?.cronExpression || buildCronExpression(schedule) || defaultSchedule.cronExpression,
     model_spec: job?.model_spec || '',
     timezone: job?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
-    tool_approval_mode: job?.tool_approval_mode || 'default'
+    tool_approval_mode: job?.tool_approval_mode || DEFAULT_TOOL_APPROVAL_MODE
   }
 }
 

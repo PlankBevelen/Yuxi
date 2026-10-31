@@ -54,7 +54,7 @@ defineProps({
   gap: 6px;
   max-width: min(100%, 360px);
   color: var(--main-700);
-  line-height: normal;
+  line-height: inherit;
   vertical-align: baseline;
   white-space: nowrap;
 }
@@ -64,10 +64,10 @@ defineProps({
 }
 
 .mention-ref-icon {
-  position: relative;
-  top: 2px;
   display: inline-flex;
   align-items: center;
+  // 头像居中，文字继续按基线对齐，保持与后续正文一致。
+  align-self: center;
   flex-shrink: 0;
   font-size: 13px;
   line-height: 1;
@@ -82,7 +82,7 @@ defineProps({
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: normal;
+  line-height: inherit;
   font-weight: 500;
 }
 </style>

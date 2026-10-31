@@ -85,3 +85,47 @@ async def test_short_letter_requests_keep_source_title_instead_of_unrelated_subj
     async with sessions() as db:
         session = await SessionRepository(db).get_session_by_thread_id("letter-title")
         assert session.title == message
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ('@session:"referenced-thread 数据库优化" 请继续分析', "数据库优化 请继续分析"),
+        ('@session:"referenced-thread 数据库优化"', "数据库优化"),
+        ("@session:referenced-thread", "引用会话"),
+        ('@session:"referenced-thread" 请继续', "引用会话 请继续"),
+        ('@session:"first-thread 数据库" 与 @session:"second-thread 索引" 对比', "数据库 与 索引 对比"),
+        ('@session:"referenced-thread 分析\\"索引\\"策略"', '分析"索引"策略'),
+        ('@session:"outer-thread @session:inner-thread PostgreSQL优化" 请继续', "引用会话 PostgreSQL优化 请继续"),
+        ('@session:"outer-thread @session:\\"inner-thread PostgreSQL优化\\"" 请继续', "PostgreSQL优化 请继续"),
+    ],
+)
+@pytest.mark.parametrize("outcome", ["generated", "timeout", "protocol"])
+async def test_session_reference_titles_keep_readable_labels(sessions, monkeypatch, content, expected, outcome):
+    """会话引用在命名输入与持久回退中均不泄露协议和线程标识。"""
+    from yuxi.modules.agents.services import titles
+
+    observed = {}
+    generated_title = f"{expected}讨论"[:30]
+    async with sessions() as db:
+        await SessionRepository(db).add_session(uid=SCOPE.uid, agent_id="main", project_id="input-project", thread_id="reference-title")
+        await db.commit()
+
+    async def invoke(messages):
+        """记录模型边界事实，由调用外断言避免被附属任务吞掉。"""
+        observed["messages"] = messages
+        async with sessions() as db:
+            session = await SessionRepository(db).get_session_by_thread_id("reference-title")
+            observed["fallback"] = session.title
+        if outcome == "timeout":
+            raise TimeoutError
+        return SimpleNamespace(text=f"@session:private-thread {expected}" if outcome == "protocol" else generated_title)
+
+    monkeypatch.setattr(titles, "system_options", SimpleNamespace(get=AsyncMock(return_value={"fast_model": "test:fast"})))
+    monkeypatch.setattr(titles, "load_chat_model", lambda *args, **kwargs: SimpleNamespace(ainvoke=invoke))
+    await titles.generate_session_title(thread_id="reference-title", uid=SCOPE.uid, app_id=None, content=content)
+    assert observed["messages"][-1] == ("human", expected)
+    assert observed["fallback"] == expected[:30]
+    async with sessions() as db:
+        session = await SessionRepository(db).get_session_by_thread_id("reference-title")
+        assert session.title == (generated_title if outcome == "generated" else expected[:30])

@@ -15,6 +15,7 @@ test('首次发送在创建 Thread 前冻结附件、图片和配置，后来草
   h.state.userInput.value = '原始输入'
   h.state.draftFilesByThread.value.__draft__ = [{ id: 'original-file' }]
   h.state.selectedModelByThread.__draft__ = 'original:model'
+  h.state.savedToolApprovalMode.value = 'default'
   const images = [{ imageUrl: 'original-image' }]
   const sending = h.state.handleSendMessage({ images })
   assert.equal(h.state.userInput.value, '', '移到底部前清空冻结文本，避免多行编辑器二次收缩')
@@ -93,6 +94,7 @@ for (const uploadTarget of ['__draft__', 'thread-a']) {
       if (calls.length === 1) throw new Error('response lost')
       return { id: 'same-session', agent: { id: 'agent' }, yuxi: {} }
     })
+    h.state.savedToolApprovalMode.value = 'default'
     await assert.rejects(h.state.createActiveThread(), /response lost/)
     h.state.savedToolApprovalMode.value = 'always_trust'
     assert.equal(await h.state.createActiveThread(), 'same-session')
@@ -105,6 +107,19 @@ for (const uploadTarget of ['__draft__', 'thread-a']) {
     assert.equal(h.state.attachmentUploadThreadKey.value, uploadTarget === '__draft__' ? 'same-session' : uploadTarget)
   })
 }
+
+test('首次创建会话明确提交完全信任，不继承智能体的审批缺省值', async (t) => {
+  const h = await mountSessionWorkspace(t)
+  h.agentStore.agents = [{ agent_id: 'agent', can_run: true, config_json: { context: { tool_approval_mode: 'default' } } }]
+  h.agentStore.selectedAgentId = 'agent'
+  t.mock.method(h.agentStore, 'fetchAgentDetail', async () => ({ can_run: true }))
+  t.mock.method(h.state.chatThreadsStore, 'createThread', async (_agent, _project, config) => {
+    assert.equal(config.tool_approval_mode, 'always_trust')
+    return { id: 'new-session', agent: { id: 'agent' }, yuxi: config }
+  })
+  assert.equal(await h.state.createActiveThread(), 'new-session')
+  assert.equal(h.state.currentToolApprovalMode.value, 'always_trust')
+})
 
 test('新建会话按稳定 agent_id 找到当前智能体，详情到达后替换列表摘要', async (t) => {
   const h = await mountSessionWorkspace(t)

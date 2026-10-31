@@ -49,7 +49,7 @@ test('tool approval modes and interrupt payloads follow their state contracts', 
       savedMode: 'always_trust',
       agentMode: 'always_trust'
     }),
-    'default'
+    'always_trust'
   )
 
   assert.deepEqual(buildToolApprovalDecisions({ 0: 'approve', 1: 'reject' }, 2), [
@@ -82,4 +82,12 @@ test('tool approval modes and interrupt payloads follow their state contracts', 
     true
   )
   assert.equal(isRunInterruptedConflict(new Error('线程正在等待用户回答或审批')), false)
+})
+
+test('前端默认完全信任，显式请求审批的会话和偏好保持不变', () => {
+  assert.equal(resolveToolApprovalMode({ hasThread: false }), 'always_trust')
+  assert.equal(resolveToolApprovalMode({ hasThread: false, agentMode: 'default' }), 'always_trust')
+  assert.equal(resolveToolApprovalMode({ hasThread: false, savedMode: 'default' }), 'default')
+  assert.equal(resolveToolApprovalMode({ hasThread: true, threadMode: 'default' }), 'default')
+  assert.equal(resolveToolApprovalMode({ hasThread: true, threadMode: 'invalid' }), 'always_trust')
 })

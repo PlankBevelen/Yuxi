@@ -178,7 +178,7 @@
                       </template>
                       <button type="button" class="user-meta" aria-label="查看完整用户信息">
                         <span class="user-name">{{ record.username }}</span>
-                        <span v-if="record.uid" class="user-uid">{{ record.user_kind === 'end_user' ? '终端用户 ID' : '登录 ID' }}：{{ record.uid }}</span>
+                        <span v-if="record.uid" class="user-uid">ID: {{ record.uid }}</span>
                       </button>
                     </a-popover>
                   </div>
@@ -286,9 +286,9 @@
             id="username-help"
             class="yuxi-form-help"
           >
-            <template v-if="userManagement.editMode">登录 ID：{{ userManagement.form.generatedUid }}，修改用户名不会改变登录 ID。</template>
-            <template v-else-if="userManagement.form.generatedUid">登录 ID：{{ userManagement.form.generatedUid }}，将用于登录。</template>
-            <template v-else>登录 ID（UID）将根据用户名自动生成，用于登录；同名用户的登录 ID 各不相同。</template>
+            <template v-if="userManagement.editMode">ID: {{ userManagement.form.generatedUid }}，修改用户名不会改变 ID。</template>
+            <template v-else-if="userManagement.form.generatedUid">ID: {{ userManagement.form.generatedUid }}，将用于登录。</template>
+            <template v-else>ID 将根据用户名自动生成，用于登录；同名用户的 ID 各不相同。</template>
           </div>
         </a-form-item>
 

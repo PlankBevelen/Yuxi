@@ -75,6 +75,20 @@ test('模型选择器按目录别名展示选中态，未命中或失败时回�
       assert.equal(component.displayModelTitle.value, 'alpha:chat')
     })
 
+    await t.test('目录返回路径形式的名称时 mini 仍展示最后一段', async () => {
+      directoryHandler = async () => ({
+        success: true,
+        data: { alpha: { models: [{ spec: 'alpha:deepseek-ai/DeepSeek-V3', display_name: 'deepseek-ai/DeepSeek-V3' }] } }
+      })
+      invalidateModelDirectory('chat')
+      const component = await setup({ model_spec: 'alpha:deepseek-ai/DeepSeek-V3', displayName: 'mini' })
+      await component.syncResolvedModelAlias()
+      assert.equal(component.displayModelText.value, 'DeepSeek-V3')
+      assert.equal(component.displayModelTitle.value, 'deepseek-ai/DeepSeek-V3')
+      const empty = await setup({ model_spec: '', placeholder: '使用系统默认' })
+      assert.equal(empty.displayModelText.value, '使用系统默认')
+    })
+
     await t.test('目录请求失败时选中态回退原规则且不抛错', async () => {
       directoryHandler = async () => {
         throw new Error('directory unavailable')

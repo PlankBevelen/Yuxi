@@ -328,7 +328,7 @@ const copyIdentifier = async () => {
 const getRoleColor = (role) => {
   switch (role) {
     case 'superadmin':
-      return 'var(--color-error-700)'
+      return 'var(--gray-900)'
     case 'admin':
       return 'var(--color-primary-500)'
     case 'user':

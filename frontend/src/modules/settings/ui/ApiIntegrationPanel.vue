@@ -1,11 +1,6 @@
 <template>
   <div class="api-integration-panel settings-page">
     <div class="settings-header">
-      <div class="settings-header-copy">
-        <p class="settings-section-description">
-          对外开放的主要端点与 APP 接入汇总。累计输入按已接收的消息提交计数，不含查询和幂等重试。
-        </p>
-      </div>
       <div class="settings-header-actions">
         <a-button
           class="yuxi-refresh-button lucide-icon-btn"
@@ -49,10 +44,6 @@
 
         <section class="integration-section">
           <div class="integration-section-title">对外端点</div>
-          <p class="integration-section-hint">
-            智能体端点使用 agents 或 full Key；知识库端点使用 knowledge 或 full Key。
-            本人身份的 Key 不传 X-End-User-Id；绑定 APP 的 Key 可用该请求头区分终端用户。提交时需提供 Idempotency-Key。
-          </p>
           <div class="settings-table-wrapper">
             <a-table
               :dataSource="PUBLIC_API_ENDPOINTS"
@@ -156,6 +147,10 @@ defineExpose({ loading, stats: totals })
 </script>
 
 <style lang="less" scoped>
+.settings-header {
+  justify-content: flex-end;
+}
+
 .api-integration-panel {
   display: flex;
   flex-direction: column;
@@ -207,13 +202,6 @@ defineExpose({ loading, stats: totals })
   color: var(--gray-900);
   font-size: 14px;
   font-weight: 600;
-}
-
-.integration-section-hint {
-  margin: 0;
-  color: var(--gray-600);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 :deep(.ant-table-thead > tr > th) {

@@ -715,7 +715,7 @@ async def test_runtime_omits_missing_and_disabled_services(scenario):
 
 @pytest.mark.parametrize("grouped", [False, True])
 async def test_runtime_reports_unknown_loading_failure_without_exposing_tools(scenario, monkeypatch, grouped):
-    """发现故障关闭该 MCP 工具，并保留安全原因供当前 Run 展示。"""
+    """发现故障不暴露工具，临时故障可重试，明确失效的凭据保留安全提示。"""
     from yuxi.modules.extensions.mcp import service
 
     assert (await finish(scenario, await begin(scenario))).status_code == 200
@@ -727,15 +727,21 @@ async def test_runtime_reports_unknown_loading_failure_without_exposing_tools(sc
         """模拟真实装配边界的未知协议故障。"""
         raise failure
 
+    original = service.personal_mcp_tools
     monkeypatch.setattr(service, "personal_mcp_tools", fail)
     unavailable, run_tools = {}, {}
     assert await service.resolve_runtime_mcp_tools(["fixture"], uid="alice", run_tools=run_tools, unavailable=unavailable) == {}
     expected = "服务连接或调用失败，请检查 MCP 服务后重试"
     if grouped:
         expected = "授权凭据不可用或已失效，请在扩展页面重新连接；" + expected
-    assert unavailable == {"fixture": expected}
+    assert unavailable == ({"fixture": expected} if grouped else {})
     assert run_tools == {}
     assert scenario["current"].get("tool_call_count", 0) == 0
+    if not grouped:
+        monkeypatch.setattr(service, "personal_mcp_tools", original)
+        recovered = await service.resolve_runtime_mcp_tools(["fixture"], uid="alice", run_tools=run_tools, unavailable=unavailable)
+        assert [tool.name for tool in recovered["fixture"]] == ["my_attendance"]
+        assert unavailable == {}
 
 
 async def test_runtime_invalid_refresh_excludes_service_and_preserves_reconnect_state(scenario):
@@ -822,11 +828,12 @@ async def test_authorization_endpoint_preserves_existing_query(scenario):
 async def test_disconnect_blocks_skill_local_side_effect_at_execution_boundary(scenario, monkeypatch, tmp_path):
     """模型已选中本地工具后撤销 MCP，真正执行处仍不允许产生文件副作用。"""
     from types import SimpleNamespace
+    from yuxi.modules.agents.runtime.agent_backends.chatbot.context import ChatBotContext
     from yuxi.modules.agents.runtime.middlewares import authorization
 
     state = await begin(scenario, "alice")
     assert (await finish(scenario, state, "alice")).status_code == 200
-    context = SimpleNamespace(
+    context = ChatBotContext(
         uid="alice",
         run_id=None,
         thread_id="fixture",
@@ -837,6 +844,7 @@ async def test_disconnect_blocks_skill_local_side_effect_at_execution_boundary(s
         mcp_tool_servers={},
         _capability_limited=False,
         skill_runtime_snapshot={
+            "skill_metadata": {},
             "effective_skills": ["report"],
             "preloaded_skills": ["report"],
             "runtime_skills": {"report": {"tools": ["write_report"], "mcps": ["fixture"], "skills": []}},
@@ -1081,6 +1089,7 @@ async def test_each_run_discovers_once_across_model_rounds(scenario, monkeypatch
             uid="alice", thread_id="fixture", workdir_relative_path="projects/fixture", tools=[], mcps=[] if via_skill else ["fixture"]
         )
         context.skill_runtime_snapshot = {
+            "skill_metadata": {},
             "effective_skills": ["report"] if via_skill else [],
             "preloaded_skills": ["report"] if via_skill else [],
             "preloaded_skill_contents": {"report": "# Report"},

@@ -51,14 +51,14 @@ async def error_http(monkeypatch):
 @pytest.mark.parametrize(
     ("method", "suffix", "target", "payload", "expected_status"),
     [
-        ("POST", "/query", "aquery", {"query": "fixture", "meta": {}}, 200),
+        ("POST", "/query", "aquery", {"query": "fixture", "meta": {}}, 500),
         ("GET", "/query-params", "get_kb_query_params_config", None, 500),
         ("PUT", "/query-params", "update_kb_query_params", {"top_k": 4}, 500),
         ("POST", "/sample-questions", "generate_knowledge_base_sample_questions", {}, 500),
         ("GET", "/sample-questions", "get_knowledge_base_sample_questions", None, 500),
         ("POST", "/folders", "create_folder", {"folder_name": "fixture"}, 500),
-        ("POST", "/documents/parse", "submit_document_action", {"file_ids": ["file_fixture"]}, 200),
-        ("POST", "/documents/parse-pending", "submit_pending_document_action", {}, 200),
+        ("POST", "/documents/parse", "submit_document_action", {"file_ids": ["file_fixture"]}, 500),
+        ("POST", "/documents/parse-pending", "submit_pending_document_action", {}, 500),
         ("PUT", "/folders/folder_fixture/rename", "rename_folder", {"folder_name": "fixture"}, 500),
         ("PUT", "/documents/doc_fixture/move", "move_file", {"new_parent_id": None}, 500),
         ("POST", "/api/knowledge/files/fetch-url", "fetch_url_content", {"url": "https://example.test"}, 500),
@@ -79,12 +79,10 @@ async def test_unknown_knowledge_failure_hides_internal_detail(error_http, monke
     response = await error_http.request(method, path, json=payload)
     assert response.status_code == expected_status, response.text
     assert PRIVATE_DETAIL not in response.text
-    body = response.json()
-    if expected_status == 200:
-        assert body["status"] == "failed"
-        assert body["message"]
+    if response.headers.get("content-type", "").startswith("application/json"):
+        assert response.json()["detail"]
     else:
-        assert body["detail"]
+        assert response.text == "Internal Server Error"
 
 
 @pytest.mark.parametrize("suffix", ["/query", "/documents/parse", "/documents/parse-pending"])

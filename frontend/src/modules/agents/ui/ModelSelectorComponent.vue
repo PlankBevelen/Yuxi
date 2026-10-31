@@ -417,13 +417,11 @@ onMounted(syncResolvedModelAlias)
 const displayModelText = computed(() => {
   const spec = props.model_spec
   if (!spec) return props.placeholder
-  if (resolvedModelAlias.value) return resolvedModelAlias.value
-
-  const modelName = extractModelName(spec)
+  const modelName = resolvedModelAlias.value || extractModelName(spec)
   if (props.displayName === 'mini') {
     return modelName.includes('/') ? modelName.split('/').pop() : modelName
   }
-  if (props.displayName === 'short') return modelName
+  if (resolvedModelAlias.value || props.displayName === 'short') return modelName
   return spec
 })
 

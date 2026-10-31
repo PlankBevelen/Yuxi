@@ -93,7 +93,7 @@ const agentForm = reactive({
   icon: ''
 })
 
-// 基本配置的原始基线，用于在标题栏显示「有修改」状态。slug / backend_id
+// 基本配置基线用于判断是否有待保存的改动。slug / backend_id
 // 仅在创建模式可编辑，因此新建时不参与比对。
 const runtimeConfig = computed({
   get: () => (editingAgentId.value ? agentStore.agentConfig : createContext.value),
@@ -244,17 +244,6 @@ const getAgentShareAllowedLevels = () => {
 
 const agentModalTitle = computed(() => (editingAgentId.value ? '编辑智能体' : '新增智能体'))
 const agentPreviewName = computed(() => agentForm.name || editingAgentId.value || '智能体')
-const selectedBackendOption = computed(() =>
-  props.backendOptions.find((backend) => backend.value === agentForm.backend_id)
-)
-const selectedBackendLabel = computed(
-  () => selectedBackendOption.value?.label || agentForm.backend_id || '未选择'
-)
-const selectedBackendIcon = computed(() => {
-  const backendText = `${agentForm.backend_id} ${selectedBackendLabel.value}`.toLowerCase()
-  return backendText.includes('deep') || backendText.includes('search') ? Microscope : Bot
-})
-
 const generateDefaultAgentProfile = () => {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
   return {
@@ -641,9 +630,9 @@ defineExpose({
           <a-button type="text" class="create-dialog-close" aria-label="关闭创建弹窗" :disabled="saving || agentIconUploading || resourceCreationOpen" @click="closeAgentModal"><X :size="18" aria-hidden="true" /></a-button>
         </div>
         <div class="agent-modal-actions" v-else-if="hasAnyUnsavedChanges">
-          <a-button size="small" :disabled="saving || boundSkillSaving" @click="closeAgentModal">取消</a-button>
-          <a-button size="small" type="primary" :loading="saving" :disabled="boundSkillSaving || agentIconUploading || resourceCreationOpen || createOutcomeUnknown || createConfigLoading" @click="saveAgent">
-            {{ editingAgentId ? '保存（有修改）' : '创建' }}
+          <a-button :disabled="saving || boundSkillSaving" @click="closeAgentModal">取消</a-button>
+          <a-button type="primary" :loading="saving" :disabled="boundSkillSaving || agentIconUploading || resourceCreationOpen || createOutcomeUnknown || createConfigLoading" @click="saveAgent">
+            保存
           </a-button>
         </div>
       </div>
@@ -669,7 +658,6 @@ defineExpose({
             <component :is="item.icon" :size="16" />
             <span>{{ item.label }}</span>
           </span>
-          <span v-if="item.key === 'model' && agentStore.hasConfigChanges" class="nav-dirty-dot" />
         </button>
       </aside>
 
@@ -684,7 +672,7 @@ defineExpose({
         />
         <section v-show="editingAgentId ? agentModalActiveTab === 'basic' : !createAdvancedOpen" class="agent-modal-section">
           <div class="agent-profile-header">
-            <div class="agent-icon-preview" aria-label="智能体图标、名称与后端">
+            <div class="agent-icon-preview" aria-label="智能体图标与名称">
               <div class="agent-profile-main">
                 <div class="agent-avatar-column">
                 <a-upload
@@ -797,19 +785,6 @@ defineExpose({
                   <span v-else class="agent-inline-slug">{{
                     agentForm.slug || editingAgentId
                   }}</span>
-                </div>
-              </div>
-              <div
-                v-if="editingAgentId"
-                class="agent-backend-summary"
-                aria-label="智能体后端"
-              >
-                <span class="agent-backend-icon">
-                  <component :is="selectedBackendIcon" :size="16" />
-                </span>
-                <div class="agent-backend-text">
-                  <span class="agent-backend-label">智能体后端</span>
-                  <span class="agent-backend-name">{{ selectedBackendLabel }}</span>
                 </div>
               </div>
             </div>
@@ -934,6 +909,7 @@ defineExpose({
 .create-field-label { display: block; color: var(--gray-800); font-size: 12px; line-height: 18px; small { margin-left: 4px; color: var(--gray-600); font-weight: 400; } }
 .required-mark { color: var(--color-error-500); }
 .create-mode {
+  .agent-modal-main { padding: 22px 18px 24px 24px; }
   .agent-icon-preview { align-items: flex-start; }
   .agent-profile-main { align-items: flex-start; flex: 1; gap: 16px; }
   .agent-icon-preview-text { flex: 1; gap: 8px; }
@@ -946,7 +922,7 @@ defineExpose({
 .create-profile-details { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; margin-top: 8px; }
 .create-profile-details:has(> .create-profile-field:only-child) { grid-template-columns: minmax(0, 1fr); }
 .create-profile-field { display: grid; gap: 8px; min-width: 0; }
-.agent-avatar-column { display: flex; flex-direction: column; align-items: center; width: 77px; gap: 10px; flex-shrink: 0; }
+.agent-avatar-column { display: flex; flex-direction: column; align-items: center; gap: 10px; flex-shrink: 0; }
 .agent-sharing-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px; border: 0; border-radius: 6px; background: var(--gray-100); color: var(--gray-700); font-size: 12px; white-space: nowrap; cursor: pointer; &:hover { background: var(--gray-200); } &:focus-visible { outline: 2px solid var(--main-color); outline-offset: 2px; } &:disabled { cursor: not-allowed; opacity: .5; } }
 .agent-share-popover { position: relative; }
 .agent-share-dropdown { position: relative; width: min(320px, calc(100vw - 48px)); max-height: 65vh; overflow-y: auto; }
@@ -980,6 +956,7 @@ defineExpose({
   justify-content: space-between;
   gap: 16px;
   width: 100%;
+  min-height: 32px;
 }
 
 .agent-modal-title {
@@ -1024,9 +1001,8 @@ defineExpose({
   flex-direction: column;
   gap: 4px;
   min-height: 0;
-  padding: 14px 10px;
+  padding: 8px;
   overflow-y: auto;
-  border-right: 1px solid var(--gray-150);
   background: transparent;
 }
 
@@ -1087,19 +1063,12 @@ defineExpose({
   color: var(--gray-700);
 }
 
-.nav-dirty-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-warning-500);
-}
-
 .agent-modal-main {
   min-width: 0;
   min-height: 0;
   overflow: hidden auto;
   overscroll-behavior: contain;
-  padding: 22px 18px 24px 24px;
+  padding: 12px 18px 24px 8px;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--gray-300) transparent;
@@ -1163,7 +1132,7 @@ defineExpose({
 }
 
 .agent-profile-header {
-  margin-bottom: 16px;
+  margin-bottom: 32px;
 }
 
 .agent-icon-preview {
@@ -1309,56 +1278,6 @@ defineExpose({
   }
 }
 
-.agent-backend-summary {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  gap: 10px;
-  width: 190px;
-  min-height: 56px;
-  padding: 10px 12px;
-  border: 1px solid var(--gray-200);
-  border-radius: 12px;
-  background: var(--gray-10);
-  color: var(--gray-700);
-}
-
-.agent-backend-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: var(--gray-100);
-  color: var(--gray-700);
-}
-
-.agent-backend-text {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  gap: 3px;
-  line-height: 1.2;
-}
-
-.agent-backend-label {
-  color: var(--gray-500);
-  font-size: 11px;
-}
-
-.agent-backend-name {
-  max-width: 128px;
-  overflow: hidden;
-  color: var(--gray-900);
-  font-size: 13px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .agent-backend-select {
   width: 128px;
   margin: -3px 0 -5px -11px;
@@ -1471,13 +1390,13 @@ defineExpose({
     width: 100%;
   }
 
-  .agent-backend-summary {
-    width: 100%;
-  }
-
   .agent-modal-content {
     grid-template-columns: 1fr;
     height: min(78vh, 680px);
+
+    &:not(.without-sidebar) {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
 
     &.create-mode {
       height: min(65vh, 540px);
@@ -1495,8 +1414,6 @@ defineExpose({
   .agent-modal-sidebar {
     flex-direction: row;
     overflow-x: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--gray-150);
   }
   .create-dialog-heading { gap: 8px; }
   .create-dialog-location { display: none; }
@@ -1529,6 +1446,11 @@ defineExpose({
   margin: 0;
   padding: 10px 24px;
   border-bottom: 1px solid var(--gray-150);
+}
+
+:global(.agent-edit-modal:not(.create-agent-modal) .ant-modal-header) {
+  padding: 16px 24px;
+  border-bottom: 0;
 }
 
 :global(.agent-edit-modal .ant-modal-title) {

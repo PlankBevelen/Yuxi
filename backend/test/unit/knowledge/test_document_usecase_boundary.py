@@ -28,12 +28,14 @@ async def test_file_metadata_read_does_not_load_execution_configuration(monkeypa
 
 @pytest.mark.parametrize("kb_type", ["milvus", "dify", "notion", "feishu"])
 async def test_query_configuration_needs_no_executor(kb_type, monkeypatch, tmp_path):
-    """每种查询配置可直接读取，不建立存储或远端连接。"""
+    """每种查询配置不构造执行器，模型选项只读取已装配的目录缓存。"""
     from yuxi.modules.knowledge.implementations.dify import DifyKB
     from yuxi.modules.knowledge.implementations.feishu import FeishuKB
     from yuxi.modules.knowledge.implementations.milvus import MilvusKB
     from yuxi.modules.knowledge.implementations.notion import NotionKB
+    from yuxi.modules.models.providers.cache import model_cache
 
+    monkeypatch.setattr(model_cache, "get_all_specs", lambda _kind: [])
     kb_class = {"milvus": MilvusKB, "dify": DifyKB, "notion": NotionKB, "feishu": FeishuKB}[kb_type]
     monkeypatch.setattr(kb_class, "__init__", lambda *_args, **_kwargs: pytest.fail("configuration constructed an executor"))
     config = kb_class.get_query_params_config()
@@ -55,7 +57,7 @@ async def test_local_document_window_does_not_load_execution_configuration(monke
     monkeypatch.setattr(manager, "get_knowledge_base_document_support", AsyncMock(return_value=(SimpleNamespace(kb_type="milvus"), True)))
     record = KnowledgeFile(file_id="file", kb_id="kb", filename="source.md", status="parsed", markdown_file="minio://parsed/source.md")
     monkeypatch.setattr("yuxi.modules.knowledge.repositories.files.KnowledgeFileRepository.get_by_file_id", AsyncMock(return_value=record))
-    monkeypatch.setattr(documents, "read_minio_bytes", AsyncMock(return_value="first\nsecond\nthird".encode()))
+    monkeypatch.setattr(documents, "read_minio_bytes", AsyncMock(return_value=b"first\nsecond\nthird"))
     result = await manager.open_document("kb", "file", offset=1, limit=1)
     assert result["content"] == "     2\tsecond"
     assert result["kb_id"] == "kb" and result["file_id"] == "file"

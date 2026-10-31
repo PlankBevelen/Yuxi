@@ -33,7 +33,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow, pytest.mar
 @pytest.mark.parametrize("mode", ["unconnected", "wrong_key", "unreachable"])
 @pytest.mark.parametrize("via_skill", [False, True])
 async def test_unavailable_mcp_preserves_chat_and_reports_reason(e2e_client, e2e_headers, mode, via_skill):
-    """未连接、错误密钥和真实网络拒绝均保留普通聊天与可读提示。"""
+    """普通聊天不受发现故障影响；凭据失效给出提示，临时网络故障不永久撤销能力。"""
     client, headers = e2e_client, e2e_headers
     suffix = uuid4().hex[:10]
     slug, agent, provider = (prefix + suffix for prefix in ("pytest-mcp-failure-", "pytest-agent-", "mcp-failure-"))
@@ -51,7 +51,7 @@ async def test_unavailable_mcp_preserves_chat_and_reports_reason(e2e_client, e2e
             names = {item["function"]["name"] for item in body.get("tools", [])}
             assert "query_my_attendance" not in names
             if via_skill:
-                assert "ocr_parse_file" not in names
+                assert ("ocr_parse_file" in names) == (mode == "unreachable")
             observed.append(system)
             common = {"id": "mcp-failure", "object": "chat.completion.chunk", "created": 1, "model": "deterministic-chat"}
             send_openai_sse_response(
@@ -152,13 +152,16 @@ async def test_unavailable_mcp_preserves_chat_and_reports_reason(e2e_client, e2e
             response = await client.get(f"/api/v1/agents/sessions/{thread}/state", headers=headers)
             assert response.status_code == 200
             warnings = response.json()["agent_state"]["warnings"]
-            assert len(warnings) == 1
-            assert warnings[0]["code"] == "mcp_unavailable"
-            assert warnings[0]["source"] == f"mcp:{slug}"
-            warning = warnings[0]["message"]
-            assert slug in warning and "secret-canary" not in warning and "TaskGroup" not in warning
-            if mode == "wrong_key":
-                assert "重新连接" in warning
+            if mode == "unreachable":
+                assert warnings == []
+            else:
+                assert len(warnings) == 1
+                assert warnings[0]["code"] == "mcp_unavailable"
+                assert warnings[0]["source"] == f"mcp:{slug}"
+                warning = warnings[0]["message"]
+                assert slug in warning and "secret-canary" not in warning and "TaskGroup" not in warning
+                if mode == "wrong_key":
+                    assert "重新连接" in warning
             async with Redis.from_url(os.environ["REDIS_URL"], decode_responses=True) as redis:
                 rows = await redis.xrange(f"run:events:v2:{run}")
             events = [json.loads(fields["event"]) for _, fields in rows]

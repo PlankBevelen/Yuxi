@@ -52,6 +52,12 @@ async page => {
           const token = host.querySelector(`${selector} .mention-ref-token`)
           const icon = token.querySelector('.mention-ref-icon')
           const style = getComputedStyle(token)
+          const label = token.querySelector('.mention-ref-label')
+          const center = node => { const rect = node.getBoundingClientRect(); return rect.y + rect.height / 2 }
+          const textCenter = node => { const range = document.createRange(); range.selectNodeContents(node); return center(range) }
+          const followingText = host.querySelector(`${selector} .mention-text-segment`) || token.parentElement.nextSibling
+          if (Math.abs(center(icon) - center(label)) > 0.5) throw new Error('引用图标与文字未垂直居中')
+          if (Math.abs(textCenter(label) - textCenter(followingText)) > 0.5) throw new Error('引用文字与后续正文未对齐')
           return { label: token.querySelector('.mention-ref-label').textContent, image: icon.querySelector('img')?.src, avatar: !!icon.querySelector('.fallback-avatar'), size: [icon.getBoundingClientRect().width, icon.getBoundingClientRect().height], styles: [style.gap, style.alignItems, style.color, style.fontWeight] }
         })
       })
@@ -74,13 +80,15 @@ async page => {
     await page.evaluate(() => { window.__mentionRendering.mention.value = { agents: [{ agent_id: 'research-fixture', name: '深度研究' }] } })
     await page.waitForFunction(() => [...document.querySelectorAll('#mention-rendering-check .mention-ref-label')].every(label => label.textContent === '深度研究'))
     const themeImages = {}
-    for (const [theme, width] of [['light', 1440], ['dark', 1440], ['light', 768], ['dark', 768]]) {
+    for (const [theme, width] of [['light', 1440], ['dark', 1440], ['light', 1024], ['dark', 1024], ['light', 768], ['dark', 768]]) {
       await page.setViewportSize({ width, height: 900 })
       await page.evaluate(mode => window.__mentionRendering.theme.setTheme(mode), theme)
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+      await page.waitForFunction(() => document.querySelector('#mention-rendering-check').getAnimations({ subtree: true }).every(animation => animation.playState !== 'running' || animation.effect.getTiming().iterations === Infinity))
       themeImages[theme] = (await compare()).image
       await page.locator('#mention-rendering-check').screenshot({ path: `/tmp/yuxi-mention-${theme}-${width}.png` })
     }
-    check(themeImages.light !== themeImages.dark, '生成头像没有响应实际主题切换')
+    check(themeImages.light === themeImages.dark, '人物头像应遵循当前色卡规则，在主题切换时保持原色')
     await page.locator('#mention-rendering-check .mention-editor').evaluate(editor => {
       editor.dispatchEvent(new InputEvent('input', { bubbles: true }))
     })
@@ -122,7 +130,7 @@ async page => {
     await page.keyboard.type('替换后的正文')
     check(await page.evaluate(() => window.__mentionRendering.draft.value) === '替换后的正文', '原生替换没有更新输入')
     check(await page.evaluate(() => window.__mentionRendering.listeners.size) === 1, '原生替换后输入头像实例未卸载')
-    return { generatedAvatar: generated.avatar, customAvatar: true, failedImageFallback: true, asyncDirectory: true, themes: ['light', 'dark'], widths: [1440, 768], rawSerialization: true, atomicDeletion: true, otherTypes: ['file', 'knowledge', 'mcp', 'skill'], nativeReplacementCleanup: true }
+    return { generatedAvatar: generated.avatar, customAvatar: true, failedImageFallback: true, asyncDirectory: true, themes: ['light', 'dark'], widths: [1440, 1024, 768], rawSerialization: true, atomicDeletion: true, otherTypes: ['file', 'knowledge', 'mcp', 'skill'], nativeReplacementCleanup: true }
   } finally {
     await page.evaluate(() => {
       const state = window.__mentionRendering

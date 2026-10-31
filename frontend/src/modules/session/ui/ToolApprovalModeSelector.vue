@@ -39,10 +39,11 @@ import { computed, ref } from 'vue'
 import { Check, Hand, ShieldAlert } from '@lucide/vue'
 import ActionDropdown from '@/shared/ui/ActionDropdown.vue'
 import ActionTrigger from '@/shared/ui/ActionTrigger.vue'
+import { DEFAULT_TOOL_APPROVAL_MODE } from '@/modules/session/model/toolApproval'
 
 const props = defineProps({
   upward: { type: Boolean, default: false },
-  modelValue: { type: String, default: 'default' }
+  modelValue: { type: String, default: DEFAULT_TOOL_APPROVAL_MODE }
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -61,7 +62,8 @@ const options = [
 
 const open = ref(false)
 const currentOption = computed(
-  () => options.find((option) => option.value === props.modelValue) || options[0]
+  () => options.find((option) => option.value === props.modelValue) ||
+    options.find((option) => option.value === DEFAULT_TOOL_APPROVAL_MODE)
 )
 
 const selectMode = (mode) => {

@@ -37,6 +37,7 @@
                     @select-model="(spec) => handleModelChange(key, spec)"
                     :model_spec="agentConfig[key] || ''"
                     :disabled="isReadOnlyConfig"
+                    :placeholder="value.placeholder || '使用系统默认'"
                     clearable
                   />
                 </div>

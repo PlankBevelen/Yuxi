@@ -1334,11 +1334,6 @@ defineExpose({
 .card-wrapper {
   position: relative;
 
-  :deep(.info-card) {
-    --border-surface: transparent;
-    --border-surface-hover: transparent;
-  }
-
   :deep(.info-card-mini-desc) {
     display: -webkit-box;
     min-height: 36px;
@@ -1388,6 +1383,11 @@ defineExpose({
     right: 16px;
     z-index: 10;
   }
+}
+
+.dark .card-wrapper :deep(.info-card) {
+  --border-surface: transparent;
+  --border-surface-hover: transparent;
 }
 
 .skill-enabled-action {

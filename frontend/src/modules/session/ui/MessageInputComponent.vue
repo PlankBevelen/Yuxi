@@ -61,37 +61,6 @@
           </button>
         </div>
         <!-- 文件列表 -->
-        <div class="mention-group session-mention-group">
-          <div class="mention-group-title">
-            对话 <span class="session-search-hint">{{ mentionQuery ? '仅搜索标题' : '最近对话 · 输入标题搜索' }}</span>
-          </div>
-          <div v-if="sessionSearchLoading" class="mention-search-placeholder" role="status">正在查找对话…</div>
-          <div v-else-if="sessionSearchError" class="session-search-error" role="status">
-            对话加载失败
-            <button type="button" @click.stop="updateMentionItems(mentionQuery)">重试</button>
-          </div>
-          <div v-else-if="!mentionItems.sessions.length" class="mention-search-placeholder">
-            {{ mentionQuery ? '未找到标题匹配的对话，试试其他关键词' : '暂无可引用的对话' }}
-          </div>
-          <button
-            v-for="(item, index) in mentionItems.sessions"
-            :key="item.value"
-            type="button"
-            :class="['mention-item', 'session-mention-item', { active: isItemSelected('session', index) }]"
-            :title="item.label"
-            @click="insertMention(item)"
-          >
-            <MessageCircle :size="16" aria-hidden="true" />
-            <span class="session-mention-title">
-              <span
-                v-for="(part, pIdx) in splitTextByQuery(item.label, mentionQuery)"
-                :key="pIdx"
-                :class="{ 'query-match': part.isMatch }"
-              >{{ part.text }}</span>
-            </span>
-            <time v-if="item.updatedAt" class="session-mention-date">{{ item.updatedAt }}</time>
-          </button>
-        </div>
         <div v-if="mentionItems.files.length > 0 || showFileSearchPrompt" class="mention-group">
           <div class="mention-group-title">文件</div>
           <div v-if="showFileSearchPrompt" class="mention-search-placeholder">
@@ -287,6 +256,38 @@
           </div>
         </div>
 
+        <!-- 对话列表 -->
+        <div class="mention-group session-mention-group">
+          <div class="mention-group-title">
+            对话 <span class="session-search-hint">{{ mentionQuery ? '仅搜索标题' : '最近对话 · 输入标题搜索' }}</span>
+          </div>
+          <div v-if="sessionSearchLoading" class="mention-search-placeholder" role="status">正在查找对话…</div>
+          <div v-else-if="sessionSearchError" class="session-search-error" role="status">
+            对话加载失败
+            <button type="button" @click.stop="updateMentionItems(mentionQuery)">重试</button>
+          </div>
+          <div v-else-if="!mentionItems.sessions.length" class="mention-search-placeholder">
+            {{ mentionQuery ? '未找到标题匹配的对话，试试其他关键词' : '暂无可引用的对话' }}
+          </div>
+          <button
+            v-for="(item, index) in mentionItems.sessions"
+            :key="item.value"
+            type="button"
+            :class="['mention-item', 'session-mention-item', { active: isItemSelected('session', index) }]"
+            :title="item.label"
+            @click="insertMention(item)"
+          >
+            <MessageCircle :size="16" aria-hidden="true" />
+            <span class="session-mention-title">
+              <span
+                v-for="(part, pIdx) in splitTextByQuery(item.label, mentionQuery)"
+                :key="pIdx"
+                :class="{ 'query-match': part.isMatch }"
+              >{{ part.text }}</span>
+            </span>
+            <time v-if="item.updatedAt" class="session-mention-date">{{ item.updatedAt }}</time>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -855,7 +856,7 @@ const updateMentionItems = (query = '') => {
     knowledgeBases: filterItems(knowledgeItems),
     mcps: filterItems(mcpItems),
     skills: filterItems(skillItems),
-    agents: filterItems(agentItems)
+    agents: filterItems(agentItems).slice(0, 5)
   }
 
   const activeThreadId = props.threadId || ''
@@ -868,6 +869,7 @@ const updateMentionItems = (query = '') => {
         const selected = mentionSelectableItems.value[mentionSelectedIndex.value]
         mentionItems.value.sessions = sessions
           .filter((session) => session.thread_id !== activeThreadId)
+          .slice(0, 5)
           .map((session) => ({
             type: 'session',
             value: session.thread_id,
@@ -919,15 +921,14 @@ const updateMentionItems = (query = '') => {
 
 // 检查项是否被选中
 const isItemSelected = (type, index) => {
-  const resourceIndex = mentionSelectedIndex.value - addActions.value.length
-  if (type === 'session') return resourceIndex === index
-  const selectedIndex = resourceIndex - mentionItems.value.sessions.length
+  const selectedIndex = mentionSelectedIndex.value - addActions.value.length
   if (selectedIndex < 0) return false
 
   const filesLen = mentionItems.value.files.length
   const kbLen = mentionItems.value.knowledgeBases.length
   const mcpLen = mentionItems.value.mcps.length
   const skillsLen = mentionItems.value.skills.length
+  const agentsLen = mentionItems.value.agents.length
 
   if (type === 'file') {
     return selectedIndex === index
@@ -939,6 +940,8 @@ const isItemSelected = (type, index) => {
     return selectedIndex === filesLen + kbLen + mcpLen + index
   } else if (type === 'agent') {
     return selectedIndex === filesLen + kbLen + mcpLen + skillsLen + index
+  } else if (type === 'session') {
+    return selectedIndex === filesLen + kbLen + mcpLen + skillsLen + agentsLen + index
   }
   return false
 }
@@ -1007,12 +1010,12 @@ const scrollToItem = (index) => {
 
 const mentionSelectableItems = computed(() => [
   ...addActions.value,
-  ...mentionItems.value.sessions,
   ...mentionItems.value.files,
   ...mentionItems.value.knowledgeBases,
   ...mentionItems.value.mcps,
   ...mentionItems.value.skills,
-  ...mentionItems.value.agents
+  ...mentionItems.value.agents,
+  ...mentionItems.value.sessions
 ])
 
 // 处理键盘导航

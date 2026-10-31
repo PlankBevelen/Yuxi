@@ -1362,15 +1362,10 @@ const handleModelSelect = (spec) => {
   }
 }
 
-const configuredAgentToolApprovalMode = computed(() => {
-  const configJson = currentAgent.value?.config_json
-  return configJson?.context?.tool_approval_mode || configJson?.tool_approval_mode || null
-})
 const currentToolApprovalMode = computed(() =>
   resolveToolApprovalMode({
     hasThread: Boolean(currentChatId.value),
     threadMode: currentThread.value?.yuxi.tool_approval_mode,
-    agentMode: configuredAgentToolApprovalMode.value,
     savedMode: savedToolApprovalMode.value
   })
 )

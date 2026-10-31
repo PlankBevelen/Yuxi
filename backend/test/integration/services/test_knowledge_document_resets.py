@@ -177,14 +177,16 @@ async def test_failed_reset_withdraws_reads_and_survives_job_history_deletion(do
             allowed_statuses={"indexed"},
             data={"status": "indexing"},
         )
-    with pytest.raises(StateConflictError, match="清除入库数据尚未完成"):
-        await files.KnowledgeFileRepository().update_fields_if_status(
-            kb_id=data.kb_id,
-            file_id="b",
-            allowed_statuses={"indexed"},
-            data={"status": "indexing"},
-            processing_job_id=context.job_id,
-        )
+    assert await files.KnowledgeFileRepository().update_fields_if_status(
+        kb_id=data.kb_id,
+        file_id="b",
+        allowed_statuses={"indexed"},
+        data={"status": "indexing"},
+        processing_job_id=context.job_id,
+        processing_owner=context.worker_id,
+    ) is None
+    unchanged = await files.KnowledgeFileRepository().get_by_file_id("b")
+    assert unchanged.status == "indexed" and unchanged.projection_status == "clear_index"
     with pytest.raises(StateConflictError):
         await data.service.reconcile_vectors(data.kb_id, all_vectors=True)
     await document_actions.submit_document_action(

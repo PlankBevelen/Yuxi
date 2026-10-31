@@ -1,8 +1,8 @@
 <template>
-  <section class="sandbox-settings settings-section-block" aria-label="Agent 环境">
+  <section class="sandbox-settings settings-section-block" aria-label="运行环境">
     <div class="settings-header">
       <div class="settings-header-copy">
-        <h3 class="settings-section-title">Agent 环境</h3>
+        <h3 class="settings-section-title">运行环境</h3>
         <p class="settings-section-description">{{ ephemeral ? '每个任务独立临时环境，任务结束后销毁' : '所有对话共享此环境' }}</p>
       </div>
       <a-button

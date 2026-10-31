@@ -1,5 +1,6 @@
 """真实 worker 使用已有历史工具读取标题引用的对话。"""
 
+import asyncio
 import json
 import re
 import uuid
@@ -69,7 +70,7 @@ class SessionMentionReplayHandler(BaseHTTPRequestHandler):
 
 
 async def test_worker_reads_selected_session_using_existing_history_tool(e2e_client, e2e_headers):
-    """标题搜索取得 ID，经持久消息传给 worker，工具结果与最终 Run 输出一致。"""
+    """引用经持久消息传给 worker，工具结果正确且自动标题不携带协议寻址串。"""
     provider_id = f"ci-session-{uuid.uuid4().hex[:8]}"
     slug = f"ci-session-{uuid.uuid4().hex[:8]}"
     source_title = make_test_session_title("mention-source")
@@ -94,7 +95,7 @@ async def test_worker_reads_selected_session_using_existing_history_tool(e2e_cli
             )
             assert agent.status_code == 200, agent.text
             agent_created = True
-            for title, content in [(source_title, fact), (make_test_session_title("mention-reader"), None)]:
+            for title, content in [(source_title, fact), (None, None)]:
                 if content is None:
                     candidates = await e2e_client.get("/api/mention/sessions", params={"query": source_title}, headers=e2e_headers)
                     assert candidates.status_code == 200, candidates.text
@@ -121,6 +122,18 @@ async def test_worker_reads_selected_session_using_existing_history_tool(e2e_cli
             assert fact in output_text(turn["yuxi"]["output"])
             connection = await asyncpg.connect(postgres_dsn())
             try:
+                async with asyncio.timeout(15):
+                    while True:
+                        session = await e2e_client.get(f"/api/v1/agents/sessions/{created_sessions[-1][0]}", headers=e2e_headers)
+                        assert session.status_code == 200, session.text
+                        title = session.json()["yuxi"]["title"]
+                        if title and title not in {"新对话", "New Session"}:
+                            break
+                        await asyncio.sleep(0.1)
+                assert "@session:" not in title and created_sessions[0][0] not in title
+                persisted_title = await connection.fetchval("SELECT title FROM sessions WHERE thread_id=$1", created_sessions[-1][0])
+                assert persisted_title and persisted_title not in {"新对话", "New Session"}
+                assert "@session:" not in persisted_title and created_sessions[0][0] not in persisted_title
                 rows = await connection.fetch(
                     "SELECT role, content, extra_metadata FROM messages WHERE run_id=$1 ORDER BY id", turn["yuxi"]["result_run_id"]
                 )

@@ -1,11 +1,12 @@
 export const TOOL_APPROVAL_MODES = ['default', 'always_trust']
 export const TOOL_APPROVAL_MODE_STORAGE_KEY = 'yuxi_tool_approval_mode'
+export const DEFAULT_TOOL_APPROVAL_MODE = 'always_trust'
 
 export const isToolApprovalMode = (value) => TOOL_APPROVAL_MODES.includes(value)
 
-export const resolveToolApprovalMode = ({ hasThread, threadMode, agentMode, savedMode }) => {
-  const candidates = hasThread ? [threadMode] : [savedMode, agentMode]
-  return candidates.find(isToolApprovalMode) || TOOL_APPROVAL_MODES[0]
+export const resolveToolApprovalMode = ({ hasThread, threadMode, savedMode }) => {
+  const selectedMode = hasThread ? threadMode : savedMode
+  return isToolApprovalMode(selectedMode) ? selectedMode : DEFAULT_TOOL_APPROVAL_MODE
 }
 
 const resolveStorage = (storage) =>
