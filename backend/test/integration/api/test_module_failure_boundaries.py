@@ -151,7 +151,7 @@ async def test_dify_http_failure_export_and_result_boundaries(test_client, admin
         path = f"/api/knowledge/knowledge-bases/{kb_id}"
         response = await test_client.get(path + "/export", headers=admin_headers)
         assert response.status_code == 501, response.text
-        assert response.json()["detail"] == "当前知识库类型不支持数据导出"
+        assert response.json()["detail"] == "知识库导出暂不支持"
 
         payload = {"query": "fixture query", "meta": {"final_top_k": 1000000}}
         response = await test_client.post(path + "/query-test", headers=admin_headers, json=payload)
@@ -161,7 +161,8 @@ async def test_dify_http_failure_export_and_result_boundaries(test_client, admin
             assert len(requests) == 2
             assert requests[-1] == {"query": "fixture query"}
             response = await test_client.post(path + "/query", headers=admin_headers, json=payload)
-            assert response.json()["status"] == "failed", response.text
+            assert response.status_code == 500, response.text
+            assert response.json()["detail"] == "知识库查询失败，请稍后重试"
             assert "result" not in response.json()
         else:
             assert response.status_code == 200, response.text
