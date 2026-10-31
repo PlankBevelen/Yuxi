@@ -38,9 +38,9 @@ def test_delegation_preserves_exact_scope_and_cannot_authenticate_as_login(selec
         {"purpose": "login"},
         {"selection": None},
         {"selection": [""]},
-        {"exp": utc_now() - timedelta(seconds=1)},
-        {"iat": utc_now() + timedelta(seconds=60)},
-        {"exp": utc_now() + timedelta(days=1)},
+        {"exp": timedelta(seconds=-1)},
+        {"iat": timedelta(seconds=60)},
+        {"exp": timedelta(days=1)},
         {"sub": ""},
     ],
 )
@@ -48,7 +48,8 @@ def test_invalid_delegation_claims_are_rejected(changes, monkeypatch):
     """重新签名非法主张也不能绕过委托契约。"""
     token = security.create_knowledge_token(uid="user", selection=[])
     claims = jwt.decode(token, options={"verify_signature": False})
-    claims.update(changes)
+    # 收集和执行可能相隔超过一分钟，时效字段必须相对执行时刻生成。
+    claims.update({key: utc_now() + value if isinstance(value, timedelta) else value for key, value in changes.items()})
     token = jwt.encode(claims, "knowledge-test-" + "k" * 40, algorithm="HS256")
     with pytest.raises(ValueError):
         security.verify_knowledge_token(token)

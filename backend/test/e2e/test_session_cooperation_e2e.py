@@ -30,7 +30,12 @@ from test.e2e.e2e_helpers import (
 from test.e2e.e2e_helpers import (
     register_replay_provider as _provider,
 )
-from test.live_api_cleanup import delete_test_session_resources, make_test_session_title, validate_test_runs_terminal
+from test.live_api_cleanup import (
+    cleanup_test_chat_resources,
+    delete_test_session_resources,
+    make_test_session_title,
+    validate_test_runs_terminal,
+)
 from yuxi.infrastructure.postgres.manager import pg_manager
 from yuxi.infrastructure.postgres.models import load_models
 from yuxi.modules.agents.runtime.sandbox import UserSandboxBackend, get_sandbox_provider
@@ -446,13 +451,23 @@ async def test_parallel_wait_inputs_keep_both_interrupts_and_resume_exact_result
 
 
 @pytest.mark.parametrize("stop_tree", [False, True])
-async def test_full_tree_capacity_control_and_sibling_tools(e2e_client, e2e_headers, stop_tree):
+async def test_full_tree_capacity_control_and_sibling_tools(e2e_client, e2e_headers, stop_tree, actors):
     """真实 worker 满槽等待推进；兄弟工具与持久整树控制不串轮次。"""
     from yuxi.modules.agents.services.cooperation import reconcile_stopped_trees
 
-    me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     await _provider(e2e_client, e2e_headers, base_url=os.environ["COOPERATION_REPLAY_URL"], provider_id="cooperation-replay")
-    slug = await _agent(e2e_client, e2e_headers, me.json()["uid"], model_spec=MODEL, summary_prompt=SUMMARY_PROMPT)
+    # list_sessions 按账户列出历史记录；独立身份把本例列表固定在当前六名成员内。
+    e2e_headers = actors["identities"]["admin0"]["headers"]
+    me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
+    slug = await _agent(
+        e2e_client,
+        e2e_headers,
+        me.json()["uid"],
+        model_spec=MODEL,
+        summary_prompt=SUMMARY_PROMPT,
+        summary_tool_result_token_limit=4096,
+        bound_skill=True,
+    )
     conn = await asyncpg.connect(postgres_dsn())
     root_id = root_turn = gate_file = workdir = None
 
@@ -514,6 +529,7 @@ async def test_full_tree_capacity_control_and_sibling_tools(e2e_client, e2e_head
             root_id,
         )
         assert len(members) == 6
+        assert await conn.fetchval("SELECT count(*) FROM sessions WHERE uid=$1", me.json()["uid"]) == 6
         ready_file = gate_file.with_name(gate_file.name + "-ready")
         if not stop_tree:
             ready_file.write_text("released")
@@ -597,7 +613,6 @@ async def test_full_tree_capacity_control_and_sibling_tools(e2e_client, e2e_head
         if gate_file is not None:
             gate_file.write_text("released")
             gate_file.with_name(gate_file.name + "-ready").write_text("released")
-        await conn.close()
         try:
             if root_id:
                 state = await e2e_client.get(f"/api/v1/agents/sessions/{root_id}/state", headers=e2e_headers)
@@ -631,11 +646,17 @@ async def test_full_tree_capacity_control_and_sibling_tools(e2e_client, e2e_head
                         error.add_note(f"Archive blockers: session={member['session_id']}, runs={blockers}, pending={pending}")
                         raise
             await delete_agent(e2e_client, e2e_headers, slug)
+            await cleanup_test_chat_resources(e2e_client, e2e_headers, owner_uid=str(me.json()["uid"]))
+            assert await conn.fetchval("SELECT count(*) FROM sessions WHERE uid=$1", me.json()["uid"]) == 0
+            if workdir:
+                assert not (user_workspace_dir(me.json()["uid"]) / workdir).exists()
         except Exception as cleanup_error:
             if body_error is not None:
                 body_error.add_note(f"测试清理另有失败: {cleanup_error}")
                 raise body_error from cleanup_error
             raise
+        finally:
+            await conn.close()
 
 
 async def _assert_thread_activity(client, headers, thread_id, expected):
@@ -740,12 +761,13 @@ async def test_worker_rejects_third_cooperation_depth_and_commits_only_allowed_m
 
 @pytest.mark.self_managed_resources
 @pytest.mark.parametrize("different_project", [False, True])
-async def test_independent_root_cooperation_uses_real_worker_and_persisted_origins(e2e_client, e2e_headers, different_project):
+async def test_independent_root_cooperation_uses_real_worker_and_persisted_origins(e2e_client, e2e_headers, different_project, actors):
     """通过模型工具创建独立根，再跨树投递与等待，来源从 HTTP 和数据库回读。"""
+    await _provider(e2e_client, e2e_headers, base_url=os.environ["COOPERATION_REPLAY_URL"], provider_id="cooperation-replay")
+    e2e_headers = actors["identities"]["admin0"]["headers"]
     me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     uid = me.json()["uid"]
-    await _provider(e2e_client, e2e_headers, base_url=os.environ["COOPERATION_REPLAY_URL"], provider_id="cooperation-replay")
-    slug = await _agent(e2e_client, e2e_headers, uid, model_spec=MODEL)
+    slug = await _agent(e2e_client, e2e_headers, uid, model_spec=MODEL, summary_tool_result_token_limit=4096, bound_skill=True)
     root_id = target_id = turn_id = None
     conn = await asyncpg.connect(postgres_dsn())
     try:
@@ -793,6 +815,7 @@ async def test_independent_root_cooperation_uses_real_worker_and_persisted_origi
                 "SELECT * FROM sessions WHERE created_by_run_id IN (SELECT id FROM agent_runs WHERE thread_id=$1)", root_id
             )
         assert target is not None and target["parent_thread_id"] is None
+        assert await conn.fetchval("SELECT count(*) FROM sessions WHERE uid=$1", uid) == 2
         target_id = target["thread_id"]
         assert target["tree_root_thread_id"] == target_id and target_id != root_id
         root_project = await conn.fetchval("SELECT project_id FROM sessions WHERE thread_id=$1", root_id)

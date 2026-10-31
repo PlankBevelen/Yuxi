@@ -77,6 +77,7 @@ async def create_lifecycle_agent(
     slug_prefix: str = "ci-lifecycle-",
     model_spec: str = DETERMINISTIC_MODEL,
     summary_prompt: str | None = None,
+    summary_tool_result_token_limit: int | None = None,
     bound_skill: bool = False,
 ) -> str:
     """创建含预加载技能且只向指定用户共享的测试 Agent。"""
@@ -96,6 +97,11 @@ async def create_lifecycle_agent(
                 "skills": [] if bound_skill else ["image-gen"],
                 "preload_skills": [] if bound_skill else ["image-gen"],
                 **({"summary_prompt": summary_prompt} if summary_prompt else {}),
+                **(
+                    {"summary_tool_result_token_limit": summary_tool_result_token_limit}
+                    if summary_tool_result_token_limit is not None
+                    else {}
+                ),
             }
         },
         "visibility": "shared",
