@@ -1,6 +1,7 @@
 """真实数据库、Skill 字节与执行图的授权刷新边界。"""
 
 import asyncio
+import hashlib
 import os
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from yuxi.modules.agents.runtime.middlewares.authorization import (
     refresh_execution_authorization,
 )
 from yuxi.modules.extensions.skills import projection
+from yuxi.modules.extensions.skills.edit import edit_shared_skill_file
 from yuxi.modules.extensions.skills.models import Skill
 from yuxi.modules.extensions.tools.runtime import resolve_configured_runtime_tools
 from yuxi.modules.identity.models import User
@@ -191,50 +193,84 @@ async def test_summary_threshold_counts_authorized_preloaded_root(authorized_con
     assert "old question" in next((workdir / "conversation_history").glob("*.md")).read_text()
 
 
-async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_root(authorized_context):
-    """同次执行冻结专属根正文，共享正文在下一边界使用当前文件。"""
+@pytest.mark.parametrize("replace_binding", [False, True])
+async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_root(authorized_context, replace_binding):
+    """同次绑定冻结已准备正文，替换绑定与新 Run 使用当前根文件。"""
     fixture = authorized_context
     bound_source = fixture.source.parent / "bound-skill"
     bound_source.mkdir()
-    (bound_source / "SKILL.md").write_text("# PREPARED_BOUND_ROOT\n")
+    prepared = "---\nslug: bound-skill\nname: Bound\ndescription: fixture\n---\n# PREPARED_BOUND_ROOT\n"
+    updated = prepared.replace("PREPARED_BOUND_ROOT", "UPDATED_BOUND_ROOT")
+    (bound_source / "SKILL.md").write_text(prepared)
     async with fixture.sessions() as db:
         agent = await db.scalar(select(Agent).where(Agent.slug == "live-agent"))
-        db.add(
-            Skill(
-                slug="bound-skill",
-                name="Bound",
-                description="fixture",
-                source_type="upload",
-                created_by="owner",
-                bound_agent_id=agent.id,
-                dir_path="shared/bound-skill",
-                share_config={},
-            )
-        )
+        agent.share_config = {**SHARED, "manage_scope": {"access_level": "user", "user_uids": ["owner"]}}
+        owner = await db.scalar(select(User).where(User.uid == "owner"))
+        owner.role = "admin"
+        bound_values = {
+            "slug": "bound-skill",
+            "name": "Bound",
+            "description": "fixture",
+            "source_type": "upload",
+            "created_by": "owner",
+            "bound_agent_id": agent.id,
+            "dir_path": "shared/bound-skill",
+            "share_config": {},
+        }
+        db.add(Skill(**bound_values))
         await db.commit()
     # 专属绑定在首次准备前已存在；与上一个已准备对象保持独立。
-    context = ChatBotContext(
-        uid="caller",
-        thread_id="live-thread",
-        agent_slug="live-agent",
-        model="fixture:model",
-        tools=[],
-        mcps=[],
-        knowledges=[],
-        skills=["live-skill"],
-        preload_skills=["live-skill"],
-    )
+    context_values = {
+        "uid": "caller",
+        "thread_id": "live-thread",
+        "agent_slug": "live-agent",
+        "model": "fixture:model",
+        "tools": [],
+        "mcps": [],
+        "knowledges": [],
+        "skills": ["live-skill"],
+        "preload_skills": ["live-skill"],
+    }
+    context = ChatBotContext(**context_values)
     await prepare_agent_runtime_context(context)
-    assert context.skill_runtime_snapshot["preloaded_skill_contents"]["bound-skill"] == "# PREPARED_BOUND_ROOT\n"
-    (bound_source / "SKILL.md").write_text("# UPDATED_BOUND_ROOT\n")
+    assert context.skill_runtime_snapshot["preloaded_skill_contents"]["bound-skill"] == prepared
+    prepared_metadata = dict(context.skill_runtime_snapshot["skill_metadata"]["bound-skill"])
+    async with fixture.sessions() as db:
+        owner = await db.scalar(select(User).where(User.uid == "owner"))
+        edited, _ = await edit_shared_skill_file(
+            db,
+            slug="bound-skill",
+            relative_path="SKILL.md",
+            content=updated,
+            expected_revision=hashlib.sha256(prepared.encode()).hexdigest(),
+            operator=owner,
+        )
+        assert edited.content_hash is not None
+        assert edited.dir_path.startswith("packages/bound-skill/")
+        if replace_binding:
+            old_id = edited.id
+            replacement = Skill(**{**bound_values, "dir_path": edited.dir_path, "content_hash": edited.content_hash})
+            await db.delete(edited)
+            await db.flush()
+            db.add(replacement)
+            await db.commit()
+            assert replacement.id != old_id
     (fixture.source / "SKILL.md").write_text("# UPDATED_SHARED_ROOT\n")
     # 模型边界顺序：完整刷新资源与快照发生在 abefore_model，投影同步发生在实际模型请求入口。
     await RuntimeAuthorizationMiddleware().abefore_model({}, SimpleNamespace(context=context))
     await refresh_execution_authorization(context)
     contents = context.skill_runtime_snapshot["preloaded_skill_contents"]
-    assert contents["bound-skill"] == "# PREPARED_BOUND_ROOT\n"
+    assert contents["bound-skill"] == (updated if replace_binding else prepared)
     assert contents["live-skill"] == "# UPDATED_SHARED_ROOT\n"
-    assert (projection.get_user_skills_root_dir("caller") / "bound-skill/SKILL.md").read_text() == "# UPDATED_BOUND_ROOT\n"
+    assert (projection.get_user_skills_root_dir("caller") / "bound-skill/SKILL.md").read_text() == updated
+    metadata = context.skill_runtime_snapshot["skill_metadata"]["bound-skill"]
+    if replace_binding:
+        assert metadata["source_identity"].split(":", 1)[0] == str(replacement.id)
+    else:
+        assert metadata == prepared_metadata
+    next_context = ChatBotContext(**context_values)
+    await prepare_agent_runtime_context(next_context)
+    assert next_context.skill_runtime_snapshot["preloaded_skill_contents"]["bound-skill"] == updated
 
 
 async def test_skill_runtime_skips_locked_invisible_row(authorized_context):

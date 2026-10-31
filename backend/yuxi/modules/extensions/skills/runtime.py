@@ -108,13 +108,7 @@ async def resolve_runtime_skills_for_context(
             preloaded_contents[slug] = previous_contents[slug]
         elif current["source_scope"] == "agent_bound" and old is not None:
             # 同一行修订沿用本 Run 准备正文；新身份不得与旧正文拼接。
-            same_revision = (
-                old["source_scope"] == "agent_bound"
-                and old["version"] == current["version"]
-                and old["content_hash"] == current["content_hash"]
-                and old["source_identity"].split(":", 1)[0] == current["source_identity"]
-            )
-            if same_revision:
+            if old["source_scope"] == "agent_bound" and old["source_identity"].split(":", 1)[0] == current["source_identity"]:
                 preloaded_contents[slug] = previous_contents[slug]
                 metadata[slug] = dict(old)
     unread = [slug for slug in preloaded_skills if slug not in preloaded_contents]

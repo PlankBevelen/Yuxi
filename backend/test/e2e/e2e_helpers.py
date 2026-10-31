@@ -319,7 +319,7 @@ async def archive_public_thread(
     async with asyncio.timeout(30):
         while True:
             archive = await client.post(f"/api/v1/agents/sessions/{thread_id}/archive", headers=headers)
-            if archive.status_code != 409 or archive.json().get("detail") != "Thread 仍有活跃执行或待处理输入":
+            if archive.status_code != 409 or archive.json().get("detail") != "会话范围内仍有活跃执行或待处理输入，不能归档":
                 assert archive.status_code == 200, archive.text
                 return
             await asyncio.sleep(0.2)
